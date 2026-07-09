@@ -56,8 +56,17 @@ export const authService = {
     };
   },
 
-  async refresh(refreshToken: string) {
-    const payload = verifyRefreshToken(refreshToken);
+  async refresh(refreshToken: string | undefined) {
+    if (!refreshToken) {
+      throw new AppError(401, "Refresh token is required");
+    }
+
+    let payload;
+    try {
+      payload = verifyRefreshToken(refreshToken);
+    } catch {
+      throw new AppError(401, "Refresh token is invalid or expired");
+    }
     const stored = await prisma.refreshToken.findUnique({
       where: { tokenHash: sha256(refreshToken) },
       include: { user: true },

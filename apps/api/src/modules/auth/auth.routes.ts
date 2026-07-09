@@ -43,6 +43,9 @@ authRouter.post("/login", validateBody(loginSchema), async (req, res, next) => {
 authRouter.post("/refresh", validateBody(refreshSchema), async (req, res, next) => {
   try {
     const token = req.body.refreshToken ?? req.cookies?.refreshToken;
+    if (!token) {
+      throw new AppError(401, "Refresh token is required");
+    }
     const result = await authService.refresh(token);
     setAuthCookies(res, result.accessToken, result.refreshToken);
     res.json({ success: true, data: result });
