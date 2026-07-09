@@ -41,21 +41,28 @@ async function bootstrap() {
   const app = createApp();
   httpServer = createServer(app);
   createSocketServer(httpServer);
-  await whatsappSessionRegistry.initializeExistingSessions();
 
-  httpServer.on("error", (error: NodeJS.ErrnoException) => {
-    if (error.code === "EADDRINUSE") {
-      logger.error(`Port ${env.PORT} is already in use. Stop the other API process and restart.`, {
-        error,
-      });
-      process.exit(1);
-    }
+  await new Promise<void>((resolve, reject) => {
+    httpServer!.on("error", (error: NodeJS.ErrnoException) => {
+      if (error.code === "EADDRINUSE") {
+        logger.error(`Port ${env.PORT} is already in use. Stop the other API process and restart.`, {
+          error,
+        });
+        process.exit(1);
+      }
 
-    logger.error("HTTP server error", { error });
+      logger.error("HTTP server error", { error });
+      reject(error);
+    });
+
+    httpServer!.listen(env.PORT, "0.0.0.0", () => {
+      logger.info(`API server listening on port ${env.PORT}`);
+      resolve();
+    });
   });
 
-  httpServer.listen(env.PORT, () => {
-    logger.info(`API server listening on port ${env.PORT}`);
+  void whatsappSessionRegistry.initializeExistingSessions().catch((error) => {
+    logger.error("Failed to initialize WhatsApp sessions", { error });
   });
 }
 
