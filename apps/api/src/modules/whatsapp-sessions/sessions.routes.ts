@@ -52,7 +52,7 @@ sessionsRouter.get("/", validateQuery(paginationQuerySchema), async (req, res) =
 
 sessionsRouter.get("/:id", async (req, res, next) => {
   try {
-    const session = await whatsappSessionRegistry.ensureSessionReady(req.params.id);
+    const session = await whatsappSessionRegistry.getSession(req.params.id);
     const qrDataUrl = session.qrCode ? await QRCode.toDataURL(session.qrCode) : null;
     res.json({ success: true, data: { ...session, qrDataUrl } });
   } catch (error) {
@@ -75,7 +75,7 @@ sessionsRouter.post("/", validateBody(createWhatsappSessionSchema), async (req, 
 
 sessionsRouter.post("/:id/connect", async (req, res, next) => {
   try {
-    await whatsappSessionRegistry.ensureSessionReady(req.params.id);
+    await whatsappSessionRegistry.startSession(req.params.id);
     const session = await prisma.whatsappSession.findUnique({ where: { id: req.params.id } });
     res.json({ success: true, data: session });
   } catch (error) {

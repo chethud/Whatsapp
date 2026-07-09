@@ -33,7 +33,7 @@ function formatSessionStatus(session: SessionRecord) {
 
   switch (session.status) {
     case "PENDING":
-      return ageMs > 45_000 ? "Stuck — reconnecting" : "Starting browser…";
+      return ageMs > 45_000 ? "Still starting — click Refresh QR if needed" : "Starting browser…";
     case "QR_READY":
       return "Ready to scan";
     case "CONNECTED":
@@ -82,7 +82,6 @@ export default function SessionsPage() {
   const [name, setName] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const connectAttemptedRef = useRef<Set<string>>(new Set());
-  const lastAutoReconnectRef = useRef<Record<string, number>>({});
   const queryClient = useQueryClient();
   const accessToken = useAppStore((state) => state.accessToken);
   const { subscribeSession } = useRealtime();
@@ -100,10 +99,7 @@ export default function SessionsPage() {
     refetchInterval: (query) => {
       const status = query.state.data?.status;
       if (status === "PENDING") {
-        return 1000;
-      }
-      if (status === "QR_READY") {
-        return 2000;
+        return 3000;
       }
       return false;
     },
@@ -185,7 +181,7 @@ export default function SessionsPage() {
       return;
     }
 
-    const needsConnect = ["PENDING", "DISCONNECTED"].includes(selectedSession.status);
+    const needsConnect = selectedSession.status === "PENDING";
     if (!needsConnect || connectAttemptedRef.current.has(selectedId)) {
       return;
     }
@@ -253,43 +249,15 @@ export default function SessionsPage() {
     onError: (error) => toast.error(error.message),
   });
 
-  useEffect(() => {
-    if (!selectedSession || selectedSession.status !== "PENDING") {
-      return;
-    }
-
-    const ageMs = Date.now() - new Date(selectedSession.updatedAt).getTime();
-    if (ageMs < 45_000) {
-      return;
-    }
-
-    const lastAttempt = lastAutoReconnectRef.current[selectedSession.id] ?? 0;
-    if (Date.now() - lastAttempt < 60_000) {
-      return;
-    }
-
-    lastAutoReconnectRef.current[selectedSession.id] = Date.now();
-    connectAttemptedRef.current.delete(selectedSession.id);
-
-    void api(`/sessions/${selectedSession.id}/reconnect`, {
-      method: "POST",
-      body: JSON.stringify({}),
-    })
-      .then(() => {
-        queryClient.invalidateQueries({ queryKey: ["session", selectedSession.id] });
-        queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      })
-      .catch((error: Error) => {
-        lastAutoReconnectRef.current[selectedSession.id] = 0;
-        toast.error(error.message);
-      });
-  }, [queryClient, selectedSession?.id, selectedSession?.status, selectedSession?.updatedAt]);
+  const refreshQr = (sessionId: string) => {
+    actionMutation.mutate({ id: sessionId, action: "reconnect" });
+  };
 
   const pairingMessage = selectedSession
     ? selectedSession.qrDataUrl
       ? "Open WhatsApp on your phone → Linked devices → Link a device, then scan this QR."
       : selectedSession.status === "PENDING"
-        ? "Starting Chrome and preparing your QR code. This usually takes 10–20 seconds."
+        ? "Starting Chrome and preparing your QR code. This usually takes 10–20 seconds. Use Refresh QR only if it does not appear."
         : selectedSession.status === "CONNECTED"
           ? `Connected as ${selectedSession.phoneNumber ?? "unknown number"}.`
           : "No QR yet. Click Refresh QR to generate one."
@@ -353,12 +321,11 @@ export default function SessionsPage() {
               <div className="flex flex-wrap gap-2">
                 <button
                   type="button"
-                  onClick={() =>
-                    actionMutation.mutate({ id: selectedSession.id, action: "reconnect" })
-                  }
-                  className="rounded-lg bg-blue-600 px-3 py-2 text-sm hover:bg-blue-500"
+                  disabled={actionMutation.isPending}
+                  onClick={() => refreshQr(selectedSession.id)}
+                  className="rounded-lg bg-blue-600 px-3 py-2 text-sm hover:bg-blue-500 disabled:opacity-60"
                 >
-                  Refresh QR
+                  {actionMutation.isPending ? "Refreshing..." : "Refresh QR"}
                 </button>
                 {(["disconnect", "logout", "delete"] as const).map((action) => (
                   <button

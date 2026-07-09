@@ -27,8 +27,6 @@ class WhatsappSessionRegistry {
   private sessions = new Map<string, ManagedSession>();
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private connectQueue: Promise<void> = Promise.resolve();
-  private reconnectCooldown = new Map<string, number>();
-  private readonly reconnectCooldownMs = 60_000;
   private readonly initializeTimeoutMs = 120_000;
 
   constructor() {
@@ -86,30 +84,24 @@ class WhatsappSessionRegistry {
     return this.connectQueue;
   }
 
-  async ensureSessionReady(sessionId: string) {
+  async getSession(sessionId: string) {
     const session = await prisma.whatsappSession.findUnique({ where: { id: sessionId } });
     if (!session) {
       throw new AppError(404, "Session not found");
     }
+    return session;
+  }
 
-    const isActive = this.sessions.has(sessionId);
+  async startSession(sessionId: string) {
+    const session = await this.getSession(sessionId);
     const startableStatuses: SessionStatus[] = [
       SessionStatus.PENDING,
       SessionStatus.DISCONNECTED,
       SessionStatus.QR_READY,
     ];
-    const shouldStart = startableStatuses.includes(session.status);
-    const isStalePending =
-      session.status === SessionStatus.PENDING && Date.now() - session.updatedAt.getTime() > 45_000;
 
-    if (isStalePending) {
-      const lastAttempt = this.reconnectCooldown.get(sessionId) ?? 0;
-      if (!isActive && Date.now() - lastAttempt > this.reconnectCooldownMs) {
-        this.reconnectCooldown.set(sessionId, Date.now());
-        this.scheduleReconnect(sessionId, "stale-pending");
-      }
-    } else if (!isActive && shouldStart) {
-      this.scheduleConnect(sessionId, "ensure");
+    if (!this.sessions.has(sessionId) && startableStatuses.includes(session.status)) {
+      this.scheduleConnect(sessionId, "start");
     }
 
     return session;
@@ -242,7 +234,6 @@ class WhatsappSessionRegistry {
   }
 
   async reconnectSession(sessionId: string) {
-    this.reconnectCooldown.set(sessionId, Date.now());
     this.scheduleReconnect(sessionId, "manual");
   }
 
