@@ -13,7 +13,7 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:migrate:deploy": "prisma migrate deploy",
     "prisma:seed": "tsx prisma/seed.ts",
-    "start:prod": "prisma migrate deploy && node dist/server.js"
+    "start:prod": "node ../../node_modules/prisma/build/index.js migrate deploy && node dist/server.js"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

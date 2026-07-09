@@ -35,4 +35,4 @@ COPY --from=builder /app/packages/shared ./packages/shared
 WORKDIR /app
 EXPOSE 10000
 
-CMD ["npm", "run", "start:prod", "--workspace", "@whatsapp/api"]
+CMD ["sh", "-c", "node node_modules/prisma/build/index.js migrate deploy --schema apps/api/prisma/schema.prisma && cd apps/api && node dist/server.js"]
