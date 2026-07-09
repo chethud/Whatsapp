@@ -1,14 +1,14 @@
 import cookieParser from "cookie-parser";
 import cors from "cors";
-import csurf from "csurf";
 import express from "express";
 import rateLimit from "express-rate-limit";
 import helmet from "helmet";
 import swaggerUi from "swagger-ui-express";
 
 import { env } from "./config/env.js";
-import { getAllowedOrigins, getCookieSameSite } from "./config/cors.js";
+import { getAllowedOrigins } from "./config/cors.js";
 import { swaggerDocument } from "./config/swagger.js";
+import { createCsrfToken, csrfProtection } from "./middleware/csrf.js";
 import { errorHandler, notFound } from "./middleware/error-handler.js";
 import { authRouter } from "./modules/auth/auth.routes.js";
 import { usersRouter } from "./modules/users/users.routes.js";
@@ -48,23 +48,14 @@ export function createApp() {
       legacyHeaders: false,
     }),
   );
-  app.use(
-    csurf({
-      cookie: {
-        httpOnly: true,
-        sameSite: getCookieSameSite(),
-        secure: env.NODE_ENV === "production",
-      },
-      ignoreMethods: ["GET", "HEAD", "OPTIONS"],
-    }),
-  );
+  app.use(csrfProtection);
 
   app.get("/health", (_req, res) => {
     res.json({ success: true, data: { status: "ok" } });
   });
 
-  app.get("/csrf-token", (req, res) => {
-    res.json({ success: true, data: { csrfToken: req.csrfToken() } });
+  app.get("/csrf-token", (_req, res) => {
+    res.json({ success: true, data: { csrfToken: createCsrfToken() } });
   });
 
   app.use("/docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
