@@ -12,7 +12,8 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:migrate:deploy": "prisma migrate deploy",
-    "prisma:seed": "tsx prisma/seed.ts"
+    "prisma:seed": "tsx prisma/seed.ts",
+    "start:prod": "prisma migrate deploy && node dist/server.js"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
@@ -36,6 +37,7 @@
     "openai": "^4.55.7",
     "pino-http": "^10.2.0",
     "qrcode": "^1.5.4",
+    "prisma": "^5.17.0",
     "socket.io": "^4.7.5",
     "swagger-ui-express": "^5.0.1",
     "uuid": "^10.0.0",
@@ -55,7 +57,6 @@
     "@types/node": "^22.0.0",
     "@types/qrcode": "^1.5.6",
     "@types/swagger-ui-express": "^4.1.6",
-    "prisma": "^5.17.0",
     "tsx": "^4.16.2"
   }
 }
