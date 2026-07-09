@@ -1,11 +1,11 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
 import { toast } from "sonner";
 
-import { api } from "@/lib/api";
+import { api, wakeApi } from "@/lib/api";
 import { setAuthTokens } from "@/lib/auth-tokens";
 import { bootstrapAuth } from "@/lib/auth";
 import { useAppStore } from "@/lib/store";
@@ -15,6 +15,27 @@ export default function LoginPage() {
   const setAccessToken = useAppStore((state) => state.setAccessToken);
   const [email, setEmail] = useState("admin@example.com");
   const [password, setPassword] = useState("ChangeMe123!");
+  const [apiStatus, setApiStatus] = useState<"checking" | "ready" | "slow">("checking");
+
+  useEffect(() => {
+    let active = true;
+
+    void wakeApi()
+      .then(() => {
+        if (active) {
+          setApiStatus("ready");
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setApiStatus("slow");
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const loginMutation = useMutation({
     mutationFn: () =>
@@ -40,6 +61,13 @@ export default function LoginPage() {
         <p className="mt-2 text-sm text-slate-400">
           Sign in with the seeded super admin to start pairing sessions and managing chats.
         </p>
+        {apiStatus === "checking" ? (
+          <p className="mt-3 text-sm text-amber-300">Connecting to API…</p>
+        ) : apiStatus === "slow" ? (
+          <p className="mt-3 text-sm text-amber-300">
+            API is waking up. Sign in may take up to a minute on the free Render plan.
+          </p>
+        ) : null}
 
         <div className="mt-8 space-y-4">
           <label className="block">
@@ -67,7 +95,11 @@ export default function LoginPage() {
           onClick={() => loginMutation.mutate()}
           className="mt-6 w-full rounded-xl bg-blue-600 px-4 py-3 font-medium text-white hover:bg-blue-500"
         >
-          {loginMutation.isPending ? "Signing in..." : "Sign in"}
+          {loginMutation.isPending
+            ? "Signing in..."
+            : apiStatus === "checking"
+              ? "Connecting..."
+              : "Sign in"}
         </button>
       </div>
     </div>

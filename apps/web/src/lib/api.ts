@@ -1,15 +1,48 @@
 import { clearAuthTokens, getAccessToken, getRefreshToken, setAuthTokens } from "./auth-tokens";
 import { useAppStore } from "./store";
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4000";
+export const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4000";
 const API_URL = `${API_BASE_URL}/api/v1`;
+const IS_REMOTE_API = !API_BASE_URL.includes("localhost");
+
+function apiUnreachableMessage() {
+  if (IS_REMOTE_API) {
+    return `Cannot reach API at ${API_BASE_URL}. The server may be waking up on Render — wait 30–60 seconds and try again.`;
+  }
+  return `Cannot reach API at ${API_BASE_URL}. Make sure the backend is running on port 4000.`;
+}
+
+async function fetchWithRetry(url: string, init?: RequestInit) {
+  const maxAttempts = IS_REMOTE_API ? 4 : 1;
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      return await fetch(url, { ...init, cache: "no-store" });
+    } catch (error) {
+      lastError = error;
+      if (attempt < maxAttempts - 1) {
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+      }
+    }
+  }
+
+  throw lastError ?? new Error(apiUnreachableMessage());
+}
+
+export async function wakeApi() {
+  const response = await fetchWithRetry(`${API_BASE_URL}/health`);
+  if (!response.ok) {
+    throw new Error(apiUnreachableMessage());
+  }
+  return response.json();
+}
 
 async function getCsrfToken() {
-  const response = await fetch(`${API_BASE_URL}/csrf-token`, {
+  const response = await fetchWithRetry(`${API_BASE_URL}/csrf-token`, {
     credentials: "include",
-    cache: "no-store",
   }).catch(() => {
-    throw new Error(`Cannot reach API at ${API_BASE_URL}. Make sure the backend is running on port 4000.`);
+    throw new Error(apiUnreachableMessage());
   });
   const payload = await response.json();
   return payload.data.csrfToken as string;
@@ -18,7 +51,7 @@ async function getCsrfToken() {
 async function refreshSession() {
   const refreshToken = getRefreshToken();
   const csrfToken = await getCsrfToken();
-  const response = await fetch(`${API_URL}/auth/refresh`, {
+  const response = await fetchWithRetry(`${API_URL}/auth/refresh`, {
     method: "POST",
     credentials: "include",
     headers: {
@@ -26,7 +59,6 @@ async function refreshSession() {
       "csrf-token": csrfToken,
     },
     body: JSON.stringify(refreshToken ? { refreshToken } : {}),
-    cache: "no-store",
   });
 
   const payload = await response.json();
@@ -59,7 +91,7 @@ export async function api<T>(path: string, init?: RequestInit, options?: ApiOpti
   const method = init?.method?.toUpperCase() ?? "GET";
   const csrfToken = ["POST", "PUT", "PATCH", "DELETE"].includes(method) ? await getCsrfToken() : undefined;
 
-  const response = await fetch(`${API_URL}${path}`, {
+  const response = await fetchWithRetry(`${API_URL}${path}`, {
     ...init,
     credentials: "include",
     headers: {
@@ -68,9 +100,8 @@ export async function api<T>(path: string, init?: RequestInit, options?: ApiOpti
       ...(csrfToken ? { "csrf-token": csrfToken } : {}),
       ...(init?.headers ?? {}),
     },
-    cache: "no-store",
   }).catch(() => {
-    throw new Error(`Cannot reach API at ${API_BASE_URL}. Make sure the backend is running on port 4000.`);
+    throw new Error(apiUnreachableMessage());
   });
 
   const payload = await response.json();

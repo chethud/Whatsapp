@@ -8,7 +8,7 @@ import { wsEventNames } from "@whatsapp/shared";
 
 import { useAppStore } from "./store";
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4000";
+import { API_BASE_URL } from "./api";
 
 let sharedSocket: Socket | null = null;
 
@@ -16,7 +16,10 @@ export function getSocket(token: string) {
   if (!sharedSocket) {
     sharedSocket = io(API_BASE_URL, {
       auth: { token },
-      transports: ["websocket"],
+      transports: ["websocket", "polling"],
+      reconnection: true,
+      reconnectionAttempts: 10,
+      reconnectionDelay: 3000,
     });
   }
   return sharedSocket;
