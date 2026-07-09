@@ -54,6 +54,19 @@ export function createApp() {
     res.json({ success: true, data: { status: "ok" } });
   });
 
+  app.get("/", (_req, res) => {
+    res.json({
+      success: true,
+      data: {
+        name: "WhatsApp Core API",
+        status: "ok",
+        health: "/health",
+        docs: "/docs",
+        api: "/api/v1",
+      },
+    });
+  });
+
   app.get("/csrf-token", (_req, res) => {
     res.json({ success: true, data: { csrfToken: createCsrfToken() } });
   });
