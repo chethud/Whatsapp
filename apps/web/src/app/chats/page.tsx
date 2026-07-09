@@ -34,6 +34,8 @@ export default function ChatsPage() {
   const [message, setMessage] = useState("");
   const [sessionFilter, setSessionFilter] = useState<string>("");
   const [chatSearch, setChatSearch] = useState("");
+  const [messageSearch, setMessageSearch] = useState("");
+  const [debouncedMessageSearch, setDebouncedMessageSearch] = useState("");
   const queryClient = useQueryClient();
   const { subscribeSession } = useRealtime();
 
@@ -75,10 +77,25 @@ export default function ChatsPage() {
 
   const selectedChat = chats.data?.items.find((chat) => chat.id === selectedChatId) ?? null;
 
+  useEffect(() => {
+    setMessageSearch("");
+    setDebouncedMessageSearch("");
+  }, [selectedChatId]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedMessageSearch(messageSearch.trim()), 300);
+    return () => window.clearTimeout(timer);
+  }, [messageSearch]);
+
   const messages = useQuery({
-    queryKey: ["messages", selectedChatId],
+    queryKey: ["messages", selectedChatId, debouncedMessageSearch],
     enabled: Boolean(selectedChatId),
-    queryFn: () => api<{ items: MessageRecord[] }>(`/messages?page=1&pageSize=100&chatId=${selectedChatId}`),
+    queryFn: () =>
+      api<{ items: MessageRecord[] }>(
+        `/messages?page=1&pageSize=200&chatId=${selectedChatId}${
+          debouncedMessageSearch ? `&search=${encodeURIComponent(debouncedMessageSearch)}` : ""
+        }`,
+      ),
   });
 
   const syncMutation = useMutation({
@@ -147,18 +164,20 @@ export default function ChatsPage() {
         ) : null}
       </div>
 
-      <input
-        value={chatSearch}
-        onChange={(event) => setChatSearch(event.target.value)}
-        placeholder="Search chats..."
-        className="mb-4 w-full max-w-md rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm"
-      />
-
       <div className="grid min-h-[70vh] gap-4 lg:grid-cols-[320px_1fr]">
         <div className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-900">
-          <div className="border-b border-slate-800 px-4 py-3 text-sm font-medium">Inbox</div>
+          <div className="border-b border-slate-800 px-4 py-3">
+            <p className="text-sm font-medium">Inbox</p>
+            <input
+              value={chatSearch}
+              onChange={(event) => setChatSearch(event.target.value)}
+              placeholder="Search chats..."
+              className="mt-3 w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-blue-500"
+            />
+          </div>
           <div className="max-h-[70vh] overflow-y-auto">
-            {(chats.data?.items ?? []).map((chat) => (
+            {(chats.data?.items ?? []).length ? (
+              chats.data?.items.map((chat) => (
               <button
                 key={chat.id}
                 type="button"
@@ -177,7 +196,10 @@ export default function ChatsPage() {
                   {chat.type} · {chat.unreadCount} unread · {formatDate(chat.lastMessageAt)}
                 </p>
               </button>
-            ))}
+              ))
+            ) : (
+              <p className="px-4 py-6 text-sm text-slate-400">No chats match your search.</p>
+            )}
           </div>
         </div>
 
@@ -187,9 +209,16 @@ export default function ChatsPage() {
               <div className="border-b border-slate-800 px-4 py-3">
                 <p className="font-medium">{selectedChat.name ?? selectedChat.externalId}</p>
                 <p className="text-xs text-slate-400">{selectedChat.externalId}</p>
+                <input
+                  value={messageSearch}
+                  onChange={(event) => setMessageSearch(event.target.value)}
+                  placeholder="Search in chat history..."
+                  className="mt-3 w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-blue-500"
+                />
               </div>
               <div className="flex-1 space-y-3 overflow-y-auto p-4">
-                {[...(messages.data?.items ?? [])].reverse().map((item) => (
+                {[...(messages.data?.items ?? [])].reverse().length ? (
+                  [...(messages.data?.items ?? [])].reverse().map((item) => (
                   <div
                     key={item.id}
                     className={`max-w-[80%] rounded-2xl px-4 py-2 text-sm ${
@@ -201,7 +230,12 @@ export default function ChatsPage() {
                     <p>{item.content ?? `[${item.type}]`}</p>
                     <p className="mt-1 text-[10px] opacity-70">{formatDate(item.sentAt)}</p>
                   </div>
-                ))}
+                  ))
+                ) : (
+                  <p className="text-center text-sm text-slate-400">
+                    {messageSearch.trim() ? "No messages match your search." : "No messages in this chat yet."}
+                  </p>
+                )}
               </div>
               <div className="border-t border-slate-800 p-4">
                 <div className="flex gap-2">

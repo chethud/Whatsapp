@@ -11,19 +11,30 @@ export const messagesRouter = Router();
 messagesRouter.use(requireAuth, requirePermission("messages.manage"));
 
 messagesRouter.get("/", validateQuery(paginationQuerySchema), async (req, res) => {
-  const { page, pageSize } = req.query as unknown as { page: number; pageSize: number };
+  const { page, pageSize, search } = req.query as unknown as {
+    page: number;
+    pageSize: number;
+    search?: string;
+  };
   const chatId = String(req.query.chatId || "");
+
+  const where = {
+    ...(chatId ? { chatId } : {}),
+    ...(search
+      ? {
+          content: { contains: search, mode: "insensitive" as const },
+        }
+      : {}),
+  };
 
   const [items, total] = await Promise.all([
     prisma.message.findMany({
-      where: chatId ? { chatId } : {},
+      where,
       orderBy: { sentAt: "desc" },
       skip: (page - 1) * pageSize,
       take: pageSize,
     }),
-    prisma.message.count({
-      where: chatId ? { chatId } : {},
-    }),
+    prisma.message.count({ where }),
   ]);
 
   res.json({ success: true, data: { items, total, page, pageSize, totalPages: Math.ceil(total / pageSize) } });
