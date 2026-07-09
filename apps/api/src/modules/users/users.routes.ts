@@ -27,23 +27,36 @@ usersRouter.get("/", async (_req, res) => {
   res.json({ success: true, data: users });
 });
 
-usersRouter.post("/", validateBody(createUserSchema), async (req, res) => {
-  const user = await prisma.user.create({
-    data: {
-      ...req.body,
-      passwordHash: await hashPassword(req.body.password),
-    },
-    select: {
-      id: true,
-      name: true,
-      email: true,
-      role: true,
-      isActive: true,
-      createdAt: true,
-    },
-  });
+usersRouter.post("/", validateBody(createUserSchema), async (req, res, next) => {
+  try {
+    const { name, email, password, role } = req.body as {
+      name: string;
+      email: string;
+      password: string;
+      role: string;
+    };
 
-  res.status(201).json({ success: true, data: user });
+    const user = await prisma.user.create({
+      data: {
+        name,
+        email,
+        role: role as "SUPER_ADMIN" | "ADMIN" | "AGENT",
+        passwordHash: await hashPassword(password),
+      },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        role: true,
+        isActive: true,
+        createdAt: true,
+      },
+    });
+
+    res.status(201).json({ success: true, data: user });
+  } catch (error) {
+    next(error);
+  }
 });
 
 usersRouter.patch("/:id", validateBody(updateUserSchema), async (req, res) => {
