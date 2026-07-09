@@ -53,7 +53,9 @@ sessionsRouter.get("/", validateQuery(paginationQuerySchema), async (req, res) =
 sessionsRouter.get("/:id", async (req, res, next) => {
   try {
     const session = await whatsappSessionRegistry.getSession(req.params.id);
-    const qrDataUrl = session.qrCode ? await QRCode.toDataURL(session.qrCode) : null;
+    const qrDataUrl = session.qrCode
+      ? await QRCode.toDataURL(session.qrCode, { margin: 1, width: 280, errorCorrectionLevel: "M" })
+      : null;
     res.json({ success: true, data: { ...session, qrDataUrl } });
   } catch (error) {
     next(error);

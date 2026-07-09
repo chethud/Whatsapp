@@ -10,7 +10,8 @@ import { logger } from "../../config/logger.js";
 import { getIo } from "../../ws/socket.js";
 import { createNotification } from "../notifications.js";
 import { AppError } from "../errors.js";
-import { buildPuppeteerOptions, resolvePuppeteerExecutablePath } from "./puppeteer.js";
+import { resolvePuppeteerExecutablePath } from "./puppeteer.js";
+import { getWhatsappClientOptions, WWEBJS_AUTH_PATH } from "./client-options.js";
 
 const { Client, LocalAuth, Location, MessageMedia } = WhatsApp;
 type WhatsappClient = InstanceType<typeof Client>;
@@ -39,12 +40,7 @@ class WhatsappSessionRegistry {
     const sessions = await prisma.whatsappSession.findMany({
       where: {
         status: {
-          in: [
-            SessionStatus.CONNECTED,
-            SessionStatus.DISCONNECTED,
-            SessionStatus.QR_READY,
-            SessionStatus.PENDING,
-          ],
+          in: [SessionStatus.CONNECTED, SessionStatus.QR_READY],
         },
       },
       orderBy: { createdAt: "desc" },
@@ -143,20 +139,20 @@ class WhatsappSessionRegistry {
     const client = new Client({
       authStrategy: new LocalAuth({
         clientId: sessionId,
-        dataPath: path.resolve(process.cwd(), ".wwebjs_auth"),
+        dataPath: WWEBJS_AUTH_PATH,
       }),
-      puppeteer: buildPuppeteerOptions(),
+      ...getWhatsappClientOptions(),
     });
 
     client.on("qr", async (qr) => {
-      const qrDataUrl = await QRCode.toDataURL(qr);
+      const qrDataUrl = await QRCode.toDataURL(qr, { margin: 1, width: 280, errorCorrectionLevel: "M" });
+      getIo()
+        .to(`session:${sessionId}`)
+        .emit(wsEventNames.qrUpdate, { sessionId, qrDataUrl, status: SessionStatus.QR_READY });
       await this.updateSession(sessionId, {
         status: SessionStatus.QR_READY,
         qrCode: qr,
       });
-      getIo()
-        .to(`session:${sessionId}`)
-        .emit(wsEventNames.qrUpdate, { sessionId, qrDataUrl, status: SessionStatus.QR_READY });
     });
 
     client.on("ready", async () => {
@@ -229,7 +225,9 @@ class WhatsappSessionRegistry {
       },
     });
 
-    this.scheduleConnect(session.id, "create");
+    void this.connectSession(session.id).catch((error) => {
+      logger.error("Initial session connect failed", { sessionId: session.id, error });
+    });
     return session;
   }
 
@@ -312,7 +310,7 @@ class WhatsappSessionRegistry {
     await prisma.aiConversation.deleteMany({ where: { sessionId } });
     await prisma.whatsappSession.delete({ where: { id: sessionId } });
 
-    const authDir = path.resolve(process.cwd(), ".wwebjs_auth", `session-${sessionId}`);
+    const authDir = path.resolve(WWEBJS_AUTH_PATH, `session-${sessionId}`);
     await fs.rm(authDir, { recursive: true, force: true }).catch(() => undefined);
   }
 

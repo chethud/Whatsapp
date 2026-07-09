@@ -96,13 +96,7 @@ export default function SessionsPage() {
     queryKey: ["session", selectedId],
     enabled: Boolean(selectedId),
     queryFn: () => api<SessionDetail>(`/sessions/${selectedId}`),
-    refetchInterval: (query) => {
-      const status = query.state.data?.status;
-      if (status === "PENDING") {
-        return 3000;
-      }
-      return false;
-    },
+    refetchInterval: (query) => (query.state.data?.status === "PENDING" ? 2000 : false),
   });
 
   useEffect(() => {
@@ -138,15 +132,20 @@ export default function SessionsPage() {
         return;
       }
 
-      queryClient.setQueryData<SessionDetail>(["session", selectedId], (current) =>
-        current
-          ? {
-              ...current,
-              status: payload.status ?? "QR_READY",
-              qrDataUrl: payload.qrDataUrl ?? current.qrDataUrl,
-            }
-          : current,
-      );
+      queryClient.setQueryData<SessionDetail>(["session", selectedId], (current) => ({
+        ...(current ?? {
+          id: selectedId,
+          name: "",
+          phoneNumber: null,
+          lastSeenAt: null,
+          heartbeatAt: null,
+          autoReconnect: true,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        }),
+        status: payload.status ?? "QR_READY",
+        qrDataUrl: payload.qrDataUrl!,
+      }));
       queryClient.invalidateQueries({ queryKey: ["sessions"] });
     };
 
@@ -176,31 +175,6 @@ export default function SessionsPage() {
     };
   }, [accessToken, queryClient, selectedId]);
 
-  useEffect(() => {
-    if (!selectedId || !selectedSession) {
-      return;
-    }
-
-    const needsConnect = selectedSession.status === "PENDING";
-    if (!needsConnect || connectAttemptedRef.current.has(selectedId)) {
-      return;
-    }
-
-    connectAttemptedRef.current.add(selectedId);
-    void api(`/sessions/${selectedId}/connect`, {
-      method: "POST",
-      body: JSON.stringify({}),
-    })
-      .then(() => {
-        queryClient.invalidateQueries({ queryKey: ["session", selectedId] });
-        queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      })
-      .catch((error: Error) => {
-        connectAttemptedRef.current.delete(selectedId);
-        toast.error(error.message);
-      });
-  }, [queryClient, selectedId, selectedSession]);
-
   const createMutation = useMutation({
     mutationFn: () =>
       api<SessionRecord>("/sessions", {
@@ -209,11 +183,15 @@ export default function SessionsPage() {
       }),
     onSuccess: (session) => {
       setName("");
-      connectAttemptedRef.current.delete(session.id);
+      connectAttemptedRef.current.add(session.id);
       setSelectedId(session.id);
+      subscribeSession(session.id);
       toast.success("Session created — preparing QR…");
+      queryClient.setQueryData<SessionDetail>(["session", session.id], {
+        ...session,
+        qrDataUrl: null,
+      });
       queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      queryClient.invalidateQueries({ queryKey: ["session", session.id] });
     },
     onError: (error) => toast.error(error.message),
   });
@@ -257,7 +235,7 @@ export default function SessionsPage() {
     ? selectedSession.qrDataUrl
       ? "Open WhatsApp on your phone → Linked devices → Link a device, then scan this QR."
       : selectedSession.status === "PENDING"
-        ? "Starting Chrome and preparing your QR code. This usually takes 10–20 seconds. Use Refresh QR only if it does not appear."
+        ? "Starting Chrome and preparing your QR code. On cloud hosting this can take 30–60 seconds."
         : selectedSession.status === "CONNECTED"
           ? `Connected as ${selectedSession.phoneNumber ?? "unknown number"}.`
           : "No QR yet. Click Refresh QR to generate one."
