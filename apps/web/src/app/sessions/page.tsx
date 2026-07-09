@@ -82,6 +82,7 @@ export default function SessionsPage() {
   const [name, setName] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const connectAttemptedRef = useRef<Set<string>>(new Set());
+  const lastAutoReconnectRef = useRef<Record<string, number>>({});
   const queryClient = useQueryClient();
   const accessToken = useAppStore((state) => state.accessToken);
   const { subscribeSession } = useRealtime();
@@ -262,13 +263,27 @@ export default function SessionsPage() {
       return;
     }
 
-    const timer = window.setTimeout(() => {
-      connectAttemptedRef.current.delete(selectedSession.id);
-      actionMutation.mutate({ id: selectedSession.id, action: "reconnect" });
-    }, 1000);
+    const lastAttempt = lastAutoReconnectRef.current[selectedSession.id] ?? 0;
+    if (Date.now() - lastAttempt < 60_000) {
+      return;
+    }
 
-    return () => window.clearTimeout(timer);
-  }, [actionMutation, selectedSession]);
+    lastAutoReconnectRef.current[selectedSession.id] = Date.now();
+    connectAttemptedRef.current.delete(selectedSession.id);
+
+    void api(`/sessions/${selectedSession.id}/reconnect`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    })
+      .then(() => {
+        queryClient.invalidateQueries({ queryKey: ["session", selectedSession.id] });
+        queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      })
+      .catch((error: Error) => {
+        lastAutoReconnectRef.current[selectedSession.id] = 0;
+        toast.error(error.message);
+      });
+  }, [queryClient, selectedSession?.id, selectedSession?.status, selectedSession?.updatedAt]);
 
   const pairingMessage = selectedSession
     ? selectedSession.qrDataUrl

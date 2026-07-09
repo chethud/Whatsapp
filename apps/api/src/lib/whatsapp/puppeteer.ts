@@ -38,6 +38,16 @@ export function buildPuppeteerOptions() {
   return {
     headless: true,
     ...(executablePath ? { executablePath } : {}),
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--disable-software-rasterizer",
+      "--disable-extensions",
+      "--no-first-run",
+      "--no-zygote",
+      "--single-process",
+    ],
   };
 }

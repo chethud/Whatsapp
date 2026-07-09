@@ -27,6 +27,9 @@ class WhatsappSessionRegistry {
   private sessions = new Map<string, ManagedSession>();
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private connectQueue: Promise<void> = Promise.resolve();
+  private reconnectCooldown = new Map<string, number>();
+  private readonly reconnectCooldownMs = 60_000;
+  private readonly initializeTimeoutMs = 120_000;
 
   constructor() {
     this.heartbeatTimer = setInterval(() => {
@@ -100,7 +103,11 @@ class WhatsappSessionRegistry {
       session.status === SessionStatus.PENDING && Date.now() - session.updatedAt.getTime() > 45_000;
 
     if (isStalePending) {
-      this.scheduleReconnect(sessionId, "stale-pending");
+      const lastAttempt = this.reconnectCooldown.get(sessionId) ?? 0;
+      if (!isActive && Date.now() - lastAttempt > this.reconnectCooldownMs) {
+        this.reconnectCooldown.set(sessionId, Date.now());
+        this.scheduleReconnect(sessionId, "stale-pending");
+      }
     } else if (!isActive && shouldStart) {
       this.scheduleConnect(sessionId, "ensure");
     }
@@ -235,6 +242,7 @@ class WhatsappSessionRegistry {
   }
 
   async reconnectSession(sessionId: string) {
+    this.reconnectCooldown.set(sessionId, Date.now());
     this.scheduleReconnect(sessionId, "manual");
   }
 
@@ -243,17 +251,30 @@ class WhatsappSessionRegistry {
       return;
     }
 
+    await this.updateSession(sessionId, {
+      status: SessionStatus.PENDING,
+    });
+
     const client = this.buildClient(sessionId);
     this.sessions.set(sessionId, { client, initialized: false });
     try {
-      await client.initialize();
+      await Promise.race([
+        client.initialize(),
+        new Promise<never>((_, reject) => {
+          setTimeout(() => {
+            reject(new Error("WhatsApp client initialization timed out"));
+          }, this.initializeTimeoutMs);
+        }),
+      ]);
       this.sessions.get(sessionId)!.initialized = true;
     } catch (error) {
+      await client.destroy().catch(() => undefined);
       this.sessions.delete(sessionId);
       await this.updateSession(sessionId, {
         status: SessionStatus.DISCONNECTED,
       }).catch(() => undefined);
       const executablePath = resolvePuppeteerExecutablePath();
+      logger.error("Failed to initialize WhatsApp session", { sessionId, error });
       throw new AppError(
         500,
         executablePath
