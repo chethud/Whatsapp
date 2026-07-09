@@ -8,7 +8,25 @@ declare global {
   var __redis__: ReturnType<typeof createRedis> | undefined;
 }
 
+function createNoopRedis() {
+  return {
+    async connect() {
+      return undefined;
+    },
+    on() {
+      return undefined;
+    },
+    disconnect() {
+      return undefined;
+    },
+  };
+}
+
 function createRedis() {
+  if (!env.REDIS_URL) {
+    return createNoopRedis();
+  }
+
   const Redis = RedisPkg as unknown as new (
     url: string,
     options: {
@@ -18,6 +36,7 @@ function createRedis() {
   ) => {
     connect(): Promise<void>;
     on(event: "error", listener: (error: unknown) => void): void;
+    disconnect(): void;
   };
 
   return new Redis(env.REDIS_URL, {

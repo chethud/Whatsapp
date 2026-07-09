@@ -7,6 +7,7 @@ import helmet from "helmet";
 import swaggerUi from "swagger-ui-express";
 
 import { env } from "./config/env.js";
+import { getAllowedOrigins, getCookieSameSite } from "./config/cors.js";
 import { swaggerDocument } from "./config/swagger.js";
 import { errorHandler, notFound } from "./middleware/error-handler.js";
 import { authRouter } from "./modules/auth/auth.routes.js";
@@ -24,10 +25,11 @@ import { notificationsRouter } from "./modules/notifications/notifications.route
 export function createApp() {
   const app = express();
 
-  const allowedOrigins =
-    env.NODE_ENV === "production"
-      ? [env.APP_ORIGIN]
-      : [env.APP_ORIGIN, "http://localhost:3000", "http://localhost:3001"];
+  if (env.NODE_ENV === "production") {
+    app.set("trust proxy", 1);
+  }
+
+  const allowedOrigins = getAllowedOrigins();
 
   app.use(
     cors({
@@ -50,7 +52,7 @@ export function createApp() {
     csurf({
       cookie: {
         httpOnly: true,
-        sameSite: "lax",
+        sameSite: getCookieSameSite(),
         secure: env.NODE_ENV === "production",
       },
       ignoreMethods: ["GET", "HEAD", "OPTIONS"],

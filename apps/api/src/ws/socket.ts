@@ -1,20 +1,15 @@
 import { Server as HttpServer } from "http";
 import { Server } from "socket.io";
 
-import { env } from "../config/env.js";
+import { getAllowedOrigins } from "../config/cors.js";
 import { verifyAccessToken } from "../lib/jwt.js";
 
 let io: Server | null = null;
 
 export function createSocketServer(httpServer: HttpServer) {
-  const allowedOrigins =
-    env.NODE_ENV === "production"
-      ? [env.APP_ORIGIN]
-      : [env.APP_ORIGIN, "http://localhost:3000", "http://localhost:3001"];
-
   io = new Server(httpServer, {
     cors: {
-      origin: allowedOrigins,
+      origin: getAllowedOrigins(),
       credentials: true,
     },
   });

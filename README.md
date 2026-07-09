@@ -40,6 +40,10 @@ npm run dev
 
 Frontend runs on [http://localhost:3000](http://localhost:3000) and the API runs on [http://localhost:4000](http://localhost:4000).
 
+## Deploy to production
+
+See [DEPLOYMENT.md](./DEPLOYMENT.md) for hosting the API on **Render** and the frontend on **Vercel**.
+
 ## Seeded credentials
 
 - Email: `admin@example.com`

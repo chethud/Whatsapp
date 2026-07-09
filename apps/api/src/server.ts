@@ -31,7 +31,7 @@ async function shutdown(signal: string) {
   });
 
   await prisma.$disconnect().catch(() => undefined);
-  redis.disconnect();
+  redis.disconnect?.();
 }
 
 async function bootstrap() {

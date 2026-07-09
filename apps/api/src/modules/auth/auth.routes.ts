@@ -5,6 +5,7 @@ import { authService } from "./auth.service.js";
 import { validateBody } from "../../middleware/validate.js";
 import { requireAuth, requireRole } from "../../middleware/auth.js";
 import { env, isProduction } from "../../config/env.js";
+import { getCookieSameSite } from "../../config/cors.js";
 import { prisma } from "../../config/prisma.js";
 import { AppError } from "../../lib/errors.js";
 import { hashPassword, verifyPassword } from "../../lib/password.js";
@@ -15,7 +16,7 @@ function setAuthCookies(res: Response, accessToken: string, refreshToken: string
   const cookieOptions = {
     httpOnly: true,
     secure: isProduction,
-    sameSite: "lax" as const,
+    sameSite: getCookieSameSite(),
     domain: env.COOKIE_DOMAIN,
   };
 

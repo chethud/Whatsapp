@@ -4,20 +4,14 @@ import type { NextRequest } from "next/server";
 const publicPaths = new Set(["/", "/login"]);
 
 export function middleware(request: NextRequest) {
-  const token = request.cookies.get("accessToken")?.value;
   const { pathname } = request.nextUrl;
 
   if (publicPaths.has(pathname)) {
-    if (token && pathname === "/login") {
-      return NextResponse.redirect(new URL("/dashboard", request.url));
-    }
     return NextResponse.next();
   }
 
-  if (!token) {
-    return NextResponse.redirect(new URL("/login", request.url));
-  }
-
+  // Protected routes are enforced client-side via AuthBootstrap + localStorage.
+  // This supports split hosting (Vercel frontend + Render API).
   return NextResponse.next();
 }
 

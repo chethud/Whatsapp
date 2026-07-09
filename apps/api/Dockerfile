@@ -1,4 +1,4 @@
-FROM node:22-alpine AS builder
+FROM node:22-bookworm-slim AS builder
 WORKDIR /app
 
 COPY package.json turbo.json tsconfig.base.json ./
@@ -13,9 +13,16 @@ RUN npm run prisma:generate --workspace @whatsapp/api
 RUN npm run build --workspace @whatsapp/shared
 RUN npm run build --workspace @whatsapp/api
 
-FROM node:22-alpine AS runner
+FROM node:22-bookworm-slim AS runner
 WORKDIR /app
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends chromium fonts-liberation ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
 ENV NODE_ENV=production
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 
 COPY --from=builder /app/package.json ./
 COPY --from=builder /app/package-lock.json ./
@@ -27,4 +34,5 @@ COPY --from=builder /app/packages/shared ./packages/shared
 
 WORKDIR /app/apps/api
 EXPOSE 4000
-CMD ["node", "dist/server.js"]
+
+CMD ["sh", "-c", "npx prisma migrate deploy && node dist/server.js"]

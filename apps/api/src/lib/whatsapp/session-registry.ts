@@ -90,9 +90,12 @@ class WhatsappSessionRegistry {
     }
 
     const isActive = this.sessions.has(sessionId);
-    const shouldStart = [SessionStatus.PENDING, SessionStatus.DISCONNECTED, SessionStatus.QR_READY].includes(
-      session.status,
-    );
+    const startableStatuses: SessionStatus[] = [
+      SessionStatus.PENDING,
+      SessionStatus.DISCONNECTED,
+      SessionStatus.QR_READY,
+    ];
+    const shouldStart = startableStatuses.includes(session.status);
     const isStalePending =
       session.status === SessionStatus.PENDING && Date.now() - session.updatedAt.getTime() > 45_000;
 
