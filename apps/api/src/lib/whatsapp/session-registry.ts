@@ -382,17 +382,26 @@ class WhatsappSessionRegistry {
   }
 
   async syncChats(sessionId: string) {
+    const session = await prisma.whatsappSession.findUnique({ where: { id: sessionId } });
+    if (!session || session.status !== SessionStatus.CONNECTED) {
+      throw new AppError(400, "Connect WhatsApp before syncing chats");
+    }
+
     const managed = this.sessions.get(sessionId);
-    if (!managed) {
+    if (!managed?.initialized) {
       throw new AppError(400, "Session is not connected");
     }
 
-    const chats = await managed.client.getChats();
-    for (const chat of chats) {
-      await this.upsertChat(sessionId, chat);
+    try {
+      const chats = await managed.client.getChats();
+      for (const chat of chats) {
+        await this.upsertChat(sessionId, chat);
+      }
+      return this.listChats(sessionId);
+    } catch (error) {
+      logger.error("Failed to sync chats from WhatsApp", { sessionId, error });
+      throw new AppError(502, "Failed to sync chats from WhatsApp");
     }
-
-    return this.listChats(sessionId);
   }
 
   private async upsertChat(sessionId: string, chat: WwebChat) {
@@ -400,18 +409,21 @@ class WhatsappSessionRegistry {
     let contactId: string | undefined;
 
     if (contact) {
-      const savedContact = await prisma.contact.upsert({
-        where: { phoneNumber: contact.number || contact.id.user },
-        update: {
-          name: contact.pushname || contact.name || contact.number,
-        },
-        create: {
-          name: contact.pushname || contact.name || contact.number,
-          phoneNumber: contact.number || contact.id.user,
-          labels: [],
-        },
-      });
-      contactId = savedContact.id;
+      const phoneNumber = contact.number || contact.id?.user;
+      if (phoneNumber) {
+        const savedContact = await prisma.contact.upsert({
+          where: { phoneNumber },
+          update: {
+            name: contact.pushname || contact.name || contact.number,
+          },
+          create: {
+            name: contact.pushname || contact.name || contact.number,
+            phoneNumber,
+            labels: [],
+          },
+        });
+        contactId = savedContact.id;
+      }
     }
 
     return prisma.chat.upsert({

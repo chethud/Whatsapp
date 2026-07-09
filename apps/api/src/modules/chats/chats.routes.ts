@@ -61,10 +61,14 @@ chatsRouter.post("/:id/pin", async (req, res) => {
   res.json({ success: true, data: chat });
 });
 
-chatsRouter.post("/:id/mark-read", async (req, res) => {
-  const chat = await prisma.chat.update({
-    where: { id: req.params.id },
-    data: { unreadCount: 0 },
-  });
-  res.json({ success: true, data: chat });
+chatsRouter.post("/:id/mark-read", async (req, res, next) => {
+  try {
+    const chat = await prisma.chat.update({
+      where: { id: req.params.id },
+      data: { unreadCount: 0 },
+    });
+    res.json({ success: true, data: chat });
+  } catch (error) {
+    next(error);
+  }
 });

@@ -42,10 +42,18 @@ export default function ChatsPage() {
   });
 
   useEffect(() => {
-    if (!sessionFilter && sessions.data?.items?.[0]?.id) {
-      setSessionFilter(sessions.data.items[0].id);
+    const items = sessions.data?.items ?? [];
+    if (!items.length || sessionFilter) {
+      return;
     }
+
+    const connected = items.find((session) => session.status === "CONNECTED");
+    setSessionFilter(connected?.id ?? items[0].id);
   }, [sessionFilter, sessions.data?.items]);
+
+  const activeSession =
+    sessions.data?.items.find((session) => session.id === sessionFilter) ?? null;
+  const isSessionConnected = activeSession?.status === "CONNECTED";
 
   useEffect(() => {
     if (sessionFilter) {
@@ -77,8 +85,11 @@ export default function ChatsPage() {
   });
 
   const sendMutation = useMutation({
-    mutationFn: () =>
-      api("/messages", {
+    mutationFn: () => {
+      if (!isSessionConnected) {
+        throw new Error("Connect WhatsApp before sending messages");
+      }
+      return api("/messages", {
         method: "POST",
         body: JSON.stringify({
           sessionId: selectedChat?.sessionId,
@@ -86,7 +97,8 @@ export default function ChatsPage() {
           content: message,
           type: "TEXT",
         }),
-      }),
+      });
+    },
     onSuccess: () => {
       setMessage("");
       queryClient.invalidateQueries({ queryKey: ["messages", selectedChatId] });
@@ -116,12 +128,17 @@ export default function ChatsPage() {
         </select>
         <button
           type="button"
-          disabled={!sessionFilter || syncMutation.isPending}
+          disabled={!sessionFilter || !isSessionConnected || syncMutation.isPending}
           onClick={() => syncMutation.mutate()}
-          className="rounded-xl border border-slate-700 px-4 py-2 text-sm hover:bg-slate-800"
+          className="rounded-xl border border-slate-700 px-4 py-2 text-sm hover:bg-slate-800 disabled:opacity-60"
         >
           Sync chats
         </button>
+        {activeSession && !isSessionConnected ? (
+          <p className="text-sm text-amber-400">
+            Session is {activeSession.status}. Scan the QR on WhatsApp Sessions before syncing or sending.
+          </p>
+        ) : null}
       </div>
 
       <div className="grid min-h-[70vh] gap-4 lg:grid-cols-[320px_1fr]">
@@ -188,7 +205,7 @@ export default function ChatsPage() {
                   />
                   <button
                     type="button"
-                    disabled={!message.trim() || sendMutation.isPending}
+                    disabled={!message.trim() || !isSessionConnected || sendMutation.isPending}
                     onClick={() => sendMutation.mutate()}
                     className="rounded-xl bg-blue-600 px-4 py-3 font-medium hover:bg-blue-500 disabled:opacity-60"
                   >
