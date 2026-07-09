@@ -33,6 +33,7 @@ export default function ChatsPage() {
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const [sessionFilter, setSessionFilter] = useState<string>("");
+  const [chatSearch, setChatSearch] = useState("");
   const queryClient = useQueryClient();
   const { subscribeSession } = useRealtime();
 
@@ -62,9 +63,14 @@ export default function ChatsPage() {
   }, [sessionFilter, subscribeSession]);
 
   const chats = useQuery({
-    queryKey: ["chats", sessionFilter],
+    queryKey: ["chats", sessionFilter, chatSearch],
     enabled: Boolean(sessionFilter),
-    queryFn: () => api<{ items: ChatRecord[] }>(`/chats?page=1&pageSize=100&sessionId=${sessionFilter}`),
+    queryFn: () =>
+      api<{ items: ChatRecord[] }>(
+        `/chats?page=1&pageSize=100&sessionId=${sessionFilter}${
+          chatSearch ? `&search=${encodeURIComponent(chatSearch)}` : ""
+        }`,
+      ),
   });
 
   const selectedChat = chats.data?.items.find((chat) => chat.id === selectedChatId) ?? null;
@@ -140,6 +146,13 @@ export default function ChatsPage() {
           </p>
         ) : null}
       </div>
+
+      <input
+        value={chatSearch}
+        onChange={(event) => setChatSearch(event.target.value)}
+        placeholder="Search chats..."
+        className="mb-4 w-full max-w-md rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm"
+      />
 
       <div className="grid min-h-[70vh] gap-4 lg:grid-cols-[320px_1fr]">
         <div className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-900">

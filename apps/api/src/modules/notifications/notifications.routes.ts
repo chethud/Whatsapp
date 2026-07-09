@@ -7,6 +7,29 @@ export const notificationsRouter = Router();
 
 notificationsRouter.use(requireAuth);
 
+notificationsRouter.get("/unread-count", async (req, res) => {
+  const count = await prisma.notification.count({
+    where: {
+      readAt: null,
+      OR: [{ userId: req.user?.id }, { userId: null }],
+    },
+  });
+
+  res.json({ success: true, data: { count } });
+});
+
+notificationsRouter.post("/read-all", async (req, res) => {
+  await prisma.notification.updateMany({
+    where: {
+      readAt: null,
+      OR: [{ userId: req.user?.id }, { userId: null }],
+    },
+    data: { readAt: new Date() },
+  });
+
+  res.json({ success: true, data: null });
+});
+
 notificationsRouter.get("/", async (req, res) => {
   const notifications = await prisma.notification.findMany({
     where: {

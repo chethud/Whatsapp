@@ -8,7 +8,7 @@ import { DashboardShell } from "@/components/dashboard-shell";
 import { DataTable } from "@/components/data-table";
 import { api } from "@/lib/api";
 
-type Template = { id: string; name: string; description: string | null };
+type Template = { id: string; name: string; description: string | null; content: string };
 type KnowledgeDoc = { id: string; title: string; category: string; updatedAt?: string };
 type SessionRecord = { id: string; name: string };
 type ChatRecord = { id: string; name: string | null; sessionId: string };
@@ -63,6 +63,21 @@ export default function AiAssistantPage() {
         }),
       }),
     onSuccess: (data) => setReply(data.reply),
+    onError: (error) => toast.error(error.message),
+  });
+
+  const sendMutation = useMutation({
+    mutationFn: () =>
+      api("/messages", {
+        method: "POST",
+        body: JSON.stringify({
+          sessionId,
+          chatId,
+          content: reply,
+          type: "TEXT",
+        }),
+      }),
+    onSuccess: () => toast.success("Reply sent to WhatsApp"),
     onError: (error) => toast.error(error.message),
   });
 
@@ -122,13 +137,34 @@ export default function AiAssistantPage() {
           <div className="mt-6 rounded-2xl border border-slate-800 bg-slate-950 p-4">
             <p className="text-sm text-slate-400">Assistant reply</p>
             <p className="mt-2 whitespace-pre-wrap text-sm text-slate-100">{reply || "No reply yet."}</p>
+            {reply ? (
+              <button
+                type="button"
+                disabled={!sessionId || !chatId || sendMutation.isPending}
+                onClick={() => sendMutation.mutate()}
+                className="mt-4 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium hover:bg-emerald-500 disabled:opacity-60"
+              >
+                {sendMutation.isPending ? "Sending..." : "Send to WhatsApp"}
+              </button>
+            ) : null}
           </div>
         </div>
 
         <div className="space-y-6">
           <DataTable
-            columns={["Prompt Template", "Description"]}
-            rows={(templates.data ?? []).map((template) => [template.name, template.description])}
+            columns={["Prompt Template", "Description", "Action"]}
+            rows={(templates.data ?? []).map((template) => [
+              template.name,
+              template.description,
+              <button
+                key={template.id}
+                type="button"
+                onClick={() => setPrompt(template.content)}
+                className="rounded-lg bg-slate-800 px-3 py-1 text-sm hover:bg-slate-700"
+              >
+                Use
+              </button>,
+            ])}
           />
           <DataTable
             columns={["Knowledge Doc", "Category"]}

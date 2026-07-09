@@ -4,6 +4,7 @@ import Link from "next/link";
 import type { Route } from "next";
 import { usePathname } from "next/navigation";
 import { useTheme } from "next-themes";
+import { useQuery } from "@tanstack/react-query";
 import {
   Bell,
   Bot,
@@ -20,6 +21,7 @@ import {
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { api } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
 
 const navItems: Array<{ href: Route; label: string; icon: typeof LayoutDashboard }> = [
@@ -46,6 +48,12 @@ export function DashboardShell({
   const pathname = usePathname();
   const { resolvedTheme, setTheme } = useTheme();
   const user = useAppStore((state) => state.user);
+  const { data: unreadNotifications } = useQuery({
+    queryKey: ["notifications-unread-count"],
+    queryFn: () => api<{ count: number }>("/notifications/unread-count"),
+    refetchInterval: 30_000,
+  });
+  const unreadCount = unreadNotifications?.count ?? 0;
 
   return (
     <div className="flex min-h-screen bg-slate-950 text-slate-50">
@@ -58,6 +66,7 @@ export function DashboardShell({
         <nav className="space-y-2">
           {navItems.map((item) => {
             const Icon = item.icon;
+            const showBadge = item.href === "/notifications" && unreadCount > 0;
             return (
               <Link
                 key={item.href}
@@ -70,7 +79,12 @@ export function DashboardShell({
                 )}
               >
                 <Icon className="h-4 w-4" />
-                {item.label}
+                <span className="flex-1">{item.label}</span>
+                {showBadge ? (
+                  <span className="rounded-full bg-red-500 px-2 py-0.5 text-xs font-medium text-white">
+                    {unreadCount}
+                  </span>
+                ) : null}
               </Link>
             );
           })}

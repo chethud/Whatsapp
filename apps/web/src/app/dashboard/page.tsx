@@ -1,14 +1,25 @@
 "use client";
 
+import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { DashboardShell } from "@/components/dashboard-shell";
 import { StatCard } from "@/components/stat-card";
-import { api } from "@/lib/api";
+import { api, wakeApi } from "@/lib/api";
 import { useRealtime } from "@/lib/socket";
 
 export default function DashboardPage() {
   useRealtime();
+
+  useEffect(() => {
+    void wakeApi().catch(() => undefined);
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") {
+        void wakeApi().catch(() => undefined);
+      }
+    }, 10 * 60 * 1000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const { data, isLoading } = useQuery({
     queryKey: ["dashboard-stats"],

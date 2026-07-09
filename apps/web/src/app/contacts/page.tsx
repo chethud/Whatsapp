@@ -19,9 +19,13 @@ type ContactRecord = {
 export default function ContactsPage() {
   const queryClient = useQueryClient();
   const [form, setForm] = useState({ name: "", phoneNumber: "", email: "" });
+  const [search, setSearch] = useState("");
   const { data } = useQuery({
-    queryKey: ["contacts"],
-    queryFn: () => api<{ items: ContactRecord[] }>("/contacts?page=1&pageSize=50"),
+    queryKey: ["contacts", search],
+    queryFn: () =>
+      api<{ items: ContactRecord[] }>(
+        `/contacts?page=1&pageSize=50${search ? `&search=${encodeURIComponent(search)}` : ""}`,
+      ),
   });
 
   const createMutation = useMutation({
@@ -77,6 +81,13 @@ export default function ContactsPage() {
           Add contact
         </button>
       </div>
+
+      <input
+        value={search}
+        onChange={(event) => setSearch(event.target.value)}
+        placeholder="Search contacts..."
+        className="mb-4 w-full max-w-md rounded-xl border border-slate-700 bg-slate-950 px-4 py-3"
+      />
 
       <DataTable
         columns={["Name", "Phone", "Email", "Lead Score"]}
