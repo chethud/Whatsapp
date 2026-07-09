@@ -38,6 +38,10 @@ sessionsRouter.get("/", validateQuery(paginationQuerySchema), async (req, res) =
     prisma.whatsappSession.count({ where }),
   ]);
 
+  for (const session of items) {
+    void whatsappSessionRegistry.restoreSessionIfNeeded(session.id);
+  }
+
   res.json({
     success: true,
     data: {
@@ -52,6 +56,7 @@ sessionsRouter.get("/", validateQuery(paginationQuerySchema), async (req, res) =
 
 sessionsRouter.get("/:id", async (req, res, next) => {
   try {
+    await whatsappSessionRegistry.restoreSessionIfNeeded(req.params.id);
     const session = await whatsappSessionRegistry.getSession(req.params.id);
     const qrDataUrl = session.qrCode
       ? await QRCode.toDataURL(session.qrCode, { margin: 1, width: 280, errorCorrectionLevel: "M" })

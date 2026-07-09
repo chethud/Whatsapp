@@ -37,9 +37,9 @@ function formatSessionStatus(session: SessionRecord) {
     case "QR_READY":
       return "Ready to scan";
     case "CONNECTED":
-      return "Connected";
+      return session.phoneNumber ? `Connected · ${session.phoneNumber}` : "Connected";
     case "DISCONNECTED":
-      return "Disconnected";
+      return session.phoneNumber ? "Disconnected — use Connect to restore" : "Disconnected";
     case "AUTH_FAILURE":
       return "Auth failed";
     case "LOGGED_OUT":
@@ -71,9 +71,9 @@ function statusClassName(status: string, updatedAt: string) {
 
 function pickDefaultSession(items: SessionRecord[]) {
   return (
+    items.find((session) => session.status === "CONNECTED") ??
     items.find((session) => session.status === "QR_READY") ??
     items.find((session) => session.status === "PENDING") ??
-    items.find((session) => session.status === "DISCONNECTED") ??
     items[0]
   );
 }
@@ -237,8 +237,10 @@ export default function SessionsPage() {
       : selectedSession.status === "PENDING"
         ? "Starting Chrome and preparing your QR code. On cloud hosting this can take 30–60 seconds."
         : selectedSession.status === "CONNECTED"
-          ? `Connected as ${selectedSession.phoneNumber ?? "unknown number"}.`
-          : "No QR yet. Click Refresh QR to generate one."
+          ? `Connected as ${selectedSession.phoneNumber ?? "unknown number"}. Stays linked until you click Disconnect.`
+          : selectedSession.status === "DISCONNECTED" && selectedSession.phoneNumber
+            ? "This account was paired before. Click Connect to restore without scanning again."
+            : "No QR yet. Click Refresh QR to generate one."
     : null;
 
   return (
@@ -297,6 +299,18 @@ export default function SessionsPage() {
               ) : null}
 
               <div className="flex flex-wrap gap-2">
+                {selectedSession.status === "DISCONNECTED" && selectedSession.phoneNumber ? (
+                  <button
+                    type="button"
+                    disabled={actionMutation.isPending}
+                    onClick={() =>
+                      actionMutation.mutate({ id: selectedSession.id, action: "connect" })
+                    }
+                    className="rounded-lg bg-emerald-600 px-3 py-2 text-sm hover:bg-emerald-500 disabled:opacity-60"
+                  >
+                    Connect
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   disabled={actionMutation.isPending}
@@ -312,7 +326,7 @@ export default function SessionsPage() {
                     onClick={() => actionMutation.mutate({ id: selectedSession.id, action })}
                     className="rounded-lg border border-slate-700 px-3 py-2 text-sm capitalize hover:bg-slate-800"
                   >
-                    {action}
+                    {action === "logout" ? "Log out WhatsApp" : action}
                   </button>
                 ))}
               </div>

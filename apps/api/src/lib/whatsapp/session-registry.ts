@@ -28,6 +28,7 @@ class WhatsappSessionRegistry {
   private sessions = new Map<string, ManagedSession>();
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private connectQueue: Promise<void> = Promise.resolve();
+  private manualDisconnects = new Set<string>();
   private readonly initializeTimeoutMs = 120_000;
 
   constructor() {
@@ -39,24 +40,60 @@ class WhatsappSessionRegistry {
   async initializeExistingSessions() {
     const sessions = await prisma.whatsappSession.findMany({
       where: {
-        status: {
-          in: [SessionStatus.CONNECTED, SessionStatus.QR_READY],
-        },
+        OR: [
+          { status: SessionStatus.CONNECTED },
+          { status: SessionStatus.QR_READY },
+          {
+            autoReconnect: true,
+            phoneNumber: { not: null },
+            status: { notIn: [SessionStatus.LOGGED_OUT, SessionStatus.AUTH_FAILURE] },
+          },
+        ],
       },
       orderBy: { createdAt: "desc" },
     });
 
     for (const session of sessions) {
-      this.scheduleConnect(session.id, "restore");
+      this.scheduleConnect(session.id, "restore", { restore: this.isPairedSession(session) });
     }
   }
 
-  private scheduleConnect(sessionId: string, reason: string) {
+  private isPairedSession(session: { phoneNumber: string | null }) {
+    return Boolean(session.phoneNumber);
+  }
+
+  async restoreSessionIfNeeded(sessionId: string) {
+    if (this.sessions.has(sessionId)) {
+      return;
+    }
+
+    const session = await prisma.whatsappSession.findUnique({ where: { id: sessionId } });
+    if (!session) {
+      return;
+    }
+
+    const shouldRestore =
+      session.status === SessionStatus.CONNECTED ||
+      session.status === SessionStatus.QR_READY ||
+      (session.autoReconnect &&
+        this.isPairedSession(session) &&
+        session.status !== SessionStatus.LOGGED_OUT);
+
+    if (shouldRestore) {
+      this.scheduleConnect(sessionId, "restore", { restore: this.isPairedSession(session) });
+    }
+  }
+
+  private scheduleConnect(
+    sessionId: string,
+    reason: string,
+    options?: { restore?: boolean },
+  ) {
     this.connectQueue = this.connectQueue
       .catch(() => undefined)
       .then(async () => {
         try {
-          await this.connectSession(sessionId);
+          await this.connectSession(sessionId, options);
         } catch (error) {
           logger.error("Scheduled connect failed", { sessionId, reason, error });
         }
@@ -70,8 +107,8 @@ class WhatsappSessionRegistry {
       .catch(() => undefined)
       .then(async () => {
         try {
-          await this.disconnectSession(sessionId).catch(() => undefined);
-          await this.connectSession(sessionId);
+          await this.disconnectSession(sessionId, { keepAutoReconnect: true }).catch(() => undefined);
+          await this.connectSession(sessionId, { restore: false });
         } catch (error) {
           logger.error("Scheduled reconnect failed", { sessionId, reason, error });
         }
@@ -97,7 +134,14 @@ class WhatsappSessionRegistry {
     ];
 
     if (!this.sessions.has(sessionId) && startableStatuses.includes(session.status)) {
-      this.scheduleConnect(sessionId, "start");
+      const restore = this.isPairedSession(session);
+      if (restore) {
+        await prisma.whatsappSession.update({
+          where: { id: sessionId },
+          data: { autoReconnect: true },
+        });
+      }
+      this.scheduleConnect(sessionId, "start", { restore });
     }
 
     return session;
@@ -161,6 +205,7 @@ class WhatsappSessionRegistry {
         status: SessionStatus.CONNECTED,
         phoneNumber: info?.wid.user ?? null,
         qrCode: null,
+        autoReconnect: true,
         lastSeenAt: new Date(),
         heartbeatAt: new Date(),
       });
@@ -186,16 +231,20 @@ class WhatsappSessionRegistry {
     });
 
     client.on("disconnected", async (reason) => {
+      if (this.manualDisconnects.has(sessionId)) {
+        return;
+      }
+
       const session = await prisma.whatsappSession.findUnique({ where: { id: sessionId } });
       await this.updateSession(sessionId, {
         status: SessionStatus.DISCONNECTED,
       });
       logger.warn("WhatsApp disconnected", { sessionId, reason });
 
-      if (session?.autoReconnect) {
+      if (session?.autoReconnect && this.isPairedSession(session)) {
         this.sessions.delete(sessionId);
         setTimeout(() => {
-          void this.connectSession(sessionId).catch((error) => {
+          void this.connectSession(sessionId, { restore: true }).catch((error) => {
             logger.error("Auto-reconnect failed", { sessionId, error });
           });
         }, 5_000);
@@ -235,14 +284,19 @@ class WhatsappSessionRegistry {
     this.scheduleReconnect(sessionId, "manual");
   }
 
-  async connectSession(sessionId: string) {
+  async connectSession(sessionId: string, options?: { restore?: boolean }) {
     if (this.sessions.has(sessionId)) {
       return;
     }
 
-    await this.updateSession(sessionId, {
-      status: SessionStatus.PENDING,
-    });
+    const existing = await prisma.whatsappSession.findUnique({ where: { id: sessionId } });
+    const isRestore = options?.restore ?? this.isPairedSession(existing ?? { phoneNumber: null });
+
+    if (!isRestore) {
+      await this.updateSession(sessionId, {
+        status: SessionStatus.PENDING,
+      });
+    }
 
     const client = this.buildClient(sessionId);
     this.sessions.set(sessionId, { client, initialized: false });
@@ -274,18 +328,22 @@ class WhatsappSessionRegistry {
     }
   }
 
-  async disconnectSession(sessionId: string) {
+  async disconnectSession(sessionId: string, options?: { keepAutoReconnect?: boolean }) {
+    this.manualDisconnects.add(sessionId);
+
     const managed = this.sessions.get(sessionId);
-    if (!managed) {
-      return;
+    if (managed) {
+      await managed.client.destroy().catch(() => undefined);
+      this.sessions.delete(sessionId);
     }
 
-    await managed.client.destroy();
-    this.sessions.delete(sessionId);
     await this.updateSession(sessionId, {
       status: SessionStatus.DISCONNECTED,
+      autoReconnect: options?.keepAutoReconnect ? true : false,
       heartbeatAt: new Date(),
     });
+
+    this.manualDisconnects.delete(sessionId);
   }
 
   async logoutSession(sessionId: string) {
@@ -300,6 +358,8 @@ class WhatsappSessionRegistry {
     await this.updateSession(sessionId, {
       status: SessionStatus.LOGGED_OUT,
       qrCode: null,
+      autoReconnect: false,
+      phoneNumber: null,
     });
   }
 

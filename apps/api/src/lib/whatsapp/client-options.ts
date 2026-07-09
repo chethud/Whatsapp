@@ -4,7 +4,7 @@ import { isProduction } from "../../config/env.js";
 import { buildPuppeteerOptions } from "./puppeteer.js";
 
 export const WWEBJS_AUTH_PATH = isProduction
-  ? "/tmp/.wwebjs_auth"
+  ? "/app/.wwebjs_auth"
   : path.resolve(process.cwd(), ".wwebjs_auth");
 
 export function getWhatsappClientOptions() {

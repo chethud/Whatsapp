@@ -36,7 +36,8 @@ COPY --from=builder /app/apps/api/prisma ./apps/api/prisma
 COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
 
 RUN npm run prisma:generate --workspace @whatsapp/api \
-  && node -e "const fs=require('fs');const path='packages/shared/package.json';const pkg=JSON.parse(fs.readFileSync(path));pkg.main='dist/index.js';pkg.types='dist/index.d.ts';fs.writeFileSync(path,JSON.stringify(pkg,null,2));"
+  && node -e "const fs=require('fs');const path='packages/shared/package.json';const pkg=JSON.parse(fs.readFileSync(path));pkg.main='dist/index.js';pkg.types='dist/index.d.ts';fs.writeFileSync(path,JSON.stringify(pkg,null,2));" \
+  && mkdir -p /app/.wwebjs_auth
 
 EXPOSE 10000
 
