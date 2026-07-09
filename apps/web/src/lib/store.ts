@@ -1,5 +1,7 @@
 import { create } from "zustand";
 
+import { clearAuthTokens } from "./auth-tokens";
+
 export type AuthUser = {
   id: string;
   name: string;
@@ -27,7 +29,7 @@ export const useAppStore = create<AppState>((set) => ({
       if (token) {
         window.localStorage.setItem("wa_access_token", token);
       } else {
-        window.localStorage.removeItem("wa_access_token");
+        clearAuthTokens();
       }
     }
     set({ accessToken: token });

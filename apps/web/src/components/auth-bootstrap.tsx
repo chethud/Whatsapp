@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import { usePathname, useRouter } from "next/navigation";
 
 import { bootstrapAuth } from "@/lib/auth";
+import { getAccessToken } from "@/lib/auth-tokens";
 import { useAppStore } from "@/lib/store";
 import { useRealtime } from "@/lib/socket";
 
@@ -17,7 +18,7 @@ export function AuthBootstrap({ children }: { children: React.ReactNode }) {
   useRealtime();
 
   useEffect(() => {
-    const token = window.localStorage.getItem("wa_access_token");
+    const token = getAccessToken();
     if (token) {
       setAccessToken(token);
     }

@@ -6,6 +6,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 
 import { api } from "@/lib/api";
+import { setAuthTokens } from "@/lib/auth-tokens";
 import { bootstrapAuth } from "@/lib/auth";
 import { useAppStore } from "@/lib/store";
 
@@ -17,11 +18,12 @@ export default function LoginPage() {
 
   const loginMutation = useMutation({
     mutationFn: () =>
-      api<{ accessToken: string }>("/auth/login", {
+      api<{ accessToken: string; refreshToken: string }>("/auth/login", {
         method: "POST",
         body: JSON.stringify({ email, password }),
       }),
     onSuccess: (data) => {
+      setAuthTokens(data.accessToken, data.refreshToken);
       setAccessToken(data.accessToken);
       void bootstrapAuth();
       toast.success("Logged in");

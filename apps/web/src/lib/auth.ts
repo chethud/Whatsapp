@@ -1,3 +1,4 @@
+import { clearAuthTokens, getAccessToken, getRefreshToken, setAuthTokens } from "./auth-tokens";
 import { api } from "./api";
 import { useAppStore, type AuthUser } from "./store";
 
@@ -10,17 +11,21 @@ export async function bootstrapAuth() {
     return user;
   } catch {
     try {
+      const refreshToken = getRefreshToken();
       const refreshed = await api<{
         accessToken: string;
+        refreshToken: string;
         user: AuthUser;
       }>("/auth/refresh", {
         method: "POST",
-        body: JSON.stringify({}),
-      });
+        body: JSON.stringify(refreshToken ? { refreshToken } : {}),
+      }, { skipAuthRetry: true });
+      setAuthTokens(refreshed.accessToken, refreshed.refreshToken);
       setAccessToken(refreshed.accessToken);
       setUser(refreshed.user);
       return refreshed.user;
     } catch {
+      clearAuthTokens();
       setAccessToken(null);
       setUser(null);
       return null;
@@ -35,6 +40,7 @@ export async function logout() {
   } catch {
     // Ignore logout failures and clear local state anyway.
   }
+  clearAuthTokens();
   setAccessToken(null);
   setUser(null);
 }
