@@ -1,0 +1,286 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  ADMIN
+  AGENT
+}
+
+enum SessionStatus {
+  PENDING
+  QR_READY
+  CONNECTED
+  DISCONNECTED
+  AUTH_FAILURE
+  LOGGED_OUT
+}
+
+enum ChatType {
+  DIRECT
+  GROUP
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum MessageType {
+  TEXT
+  IMAGE
+  PDF
+  AUDIO
+  VIDEO
+  LOCATION
+  CONTACT
+  SYSTEM
+}
+
+enum NotificationType {
+  INFO
+  SUCCESS
+  WARNING
+  ERROR
+}
+
+enum AiProvider {
+  OPENAI
+  GEMINI
+  COMPATIBLE
+}
+
+model User {
+  id             String         @id @default(uuid())
+  name           String
+  email          String         @unique
+  passwordHash   String
+  role           UserRole
+  isActive       Boolean        @default(true)
+  twoFactorEnabled Boolean      @default(false)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  refreshTokens  RefreshToken[]
+  auditLogs      AuditLog[]
+  assignedSessions WhatsappSession[] @relation("SessionOwner")
+  notifications  Notification[]
+}
+
+model RefreshToken {
+  id         String   @id @default(uuid())
+  tokenHash  String   @unique
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  createdAt  DateTime @default(now())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  action     String
+  entityType String
+  entityId   String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+}
+
+model AppSetting {
+  id               String   @id @default(uuid())
+  businessName     String   @default("WhatsApp Core Platform")
+  timezone         String   @default("UTC")
+  aiAutoReplyEnabled Boolean @default(false)
+  defaultAiProvider AiProvider @default(OPENAI)
+  slackWebhookUrl  String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+model WhatsappSession {
+  id             String        @id @default(uuid())
+  name           String
+  phoneNumber    String?
+  status         SessionStatus @default(PENDING)
+  qrCode         String?
+  lastSeenAt     DateTime?
+  heartbeatAt    DateTime?
+  autoReconnect  Boolean       @default(true)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  ownerId        String?
+  owner          User?         @relation("SessionOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  chats          Chat[]
+  messages       Message[]
+  aiConversations AiConversation[]
+}
+
+model Contact {
+  id           String    @id @default(uuid())
+  name         String
+  phoneNumber  String    @unique
+  email        String?
+  notes        String?
+  labels       String[]
+  customFields Json?
+  favorite     Boolean   @default(false)
+  blocked      Boolean   @default(false)
+  leadScore    Int       @default(0)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  chats        Chat[]
+  tags         ContactTagOnContact[]
+}
+
+model ContactTag {
+  id        String               @id @default(uuid())
+  name      String               @unique
+  createdAt DateTime             @default(now())
+  contacts  ContactTagOnContact[]
+}
+
+model ContactTagOnContact {
+  contactId String
+  tagId     String
+  contact   Contact    @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  tag       ContactTag @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([contactId, tagId])
+}
+
+model Chat {
+  id             String      @id @default(uuid())
+  externalId     String      @unique
+  name           String?
+  type           ChatType
+  unreadCount    Int         @default(0)
+  pinned         Boolean     @default(false)
+  archived       Boolean     @default(false)
+  mutedUntil     DateTime?
+  lastMessageAt  DateTime?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+  sessionId      String
+  session        WhatsappSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  contactId      String?
+  contact        Contact?    @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  messages       Message[]
+  participants   ChatParticipant[]
+  aiConversations AiConversation[]
+}
+
+model ChatParticipant {
+  id             String   @id @default(uuid())
+  externalId     String
+  displayName    String?
+  isAdmin        Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  chatId         String
+  chat           Chat     @relation(fields: [chatId], references: [id], onDelete: Cascade)
+
+  @@unique([chatId, externalId])
+}
+
+model Message {
+  id             String           @id @default(uuid())
+  externalId     String?          @unique
+  direction      MessageDirection
+  type           MessageType
+  content        String?
+  mediaUrl       String?
+  mimeType       String?
+  fileName       String?
+  latitude       Float?
+  longitude      Float?
+  sentAt         DateTime         @default(now())
+  scheduledAt    DateTime?
+  status         String           @default("queued")
+  starred        Boolean          @default(false)
+  deleted        Boolean          @default(false)
+  metadata       Json?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  sessionId      String
+  session        WhatsappSession  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  chatId         String
+  chat           Chat             @relation(fields: [chatId], references: [id], onDelete: Cascade)
+}
+
+model AiProviderConfig {
+  id             String     @id @default(uuid())
+  provider       AiProvider
+  model          String
+  apiKeyMasked   String?
+  baseUrl        String?
+  temperature    Float      @default(0.4)
+  maxTokens      Int        @default(600)
+  active         Boolean    @default(true)
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+}
+
+model PromptTemplate {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  description String?
+  content     String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model KnowledgeDocument {
+  id         String   @id @default(uuid())
+  title      String
+  category   String
+  content    String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+model AiConversation {
+  id              String           @id @default(uuid())
+  summary         String?
+  escalatedToHuman Boolean         @default(false)
+  leadQualification Json?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  sessionId       String
+  session         WhatsappSession  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  chatId          String
+  chat            Chat             @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  messages        AiMessage[]
+
+  @@unique([sessionId, chatId])
+}
+
+model AiMessage {
+  id             String         @id @default(uuid())
+  role           String
+  content        String
+  model          String?
+  promptTokens   Int?
+  completionTokens Int?
+  createdAt      DateTime       @default(now())
+  conversationId String
+  conversation   AiConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+}
+
+model Notification {
+  id         String           @id @default(uuid())
+  title      String
+  body       String
+  type       NotificationType @default(INFO)
+  readAt     DateTime?
+  metadata   Json?
+  createdAt  DateTime         @default(now())
+  userId     String?
+  user       User?            @relation(fields: [userId], references: [id], onDelete: SetNull)
+}

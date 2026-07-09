@@ -1,0 +1,16 @@
+node_modules
+.turbo
+.next
+dist
+coverage
+.env
+.env.*
+!.env.example
+apps/api/prisma/dev.db
+apps/api/prisma/*.db
+apps/api/.wwebjs_auth
+apps/api/.wwebjs_cache
+apps/api/storage
+apps/api/uploads
+apps/web/.next
+apps/web/out

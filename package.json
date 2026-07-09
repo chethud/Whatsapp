@@ -1,0 +1,25 @@
+{
+  "name": "whatsapp-core-platform",
+  "version": "1.0.0",
+  "private": true,
+  "packageManager": "npm@10.9.2",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "turbo run dev --parallel",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "format": "prettier --write .",
+    "db:generate": "npm run prisma:generate --workspace @whatsapp/api",
+    "db:migrate": "npm run prisma:migrate --workspace @whatsapp/api",
+    "db:seed": "npm run prisma:seed --workspace @whatsapp/api"
+  },
+  "devDependencies": {
+    "prettier": "^3.3.3",
+    "turbo": "^2.1.1",
+    "typescript": "^5.5.4"
+  }
+}

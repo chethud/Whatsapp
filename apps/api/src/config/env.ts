@@ -1,0 +1,31 @@
+import { config } from "dotenv";
+import { dirname, resolve } from "path";
+import { fileURLToPath } from "url";
+import { z } from "zod";
+
+config({
+  path: resolve(dirname(fileURLToPath(import.meta.url)), "../../.env"),
+  override: true,
+});
+
+const envSchema = z.object({
+  NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  PORT: z.coerce.number().default(4000),
+  APP_ORIGIN: z.string().default("http://localhost:3000"),
+  DATABASE_URL: z.string().min(1),
+  REDIS_URL: z.string().min(1),
+  JWT_ACCESS_SECRET: z.string().min(32),
+  JWT_REFRESH_SECRET: z.string().min(32),
+  JWT_ACCESS_TTL: z.string().default("15m"),
+  JWT_REFRESH_TTL: z.string().default("7d"),
+  COOKIE_DOMAIN: z.string().optional(),
+  PUPPETEER_EXECUTABLE_PATH: z.string().optional(),
+  OPENAI_API_KEY: z.string().optional(),
+  GEMINI_API_KEY: z.string().optional(),
+  COMPATIBLE_AI_BASE_URL: z.string().optional(),
+  COMPATIBLE_AI_API_KEY: z.string().optional(),
+  CSRF_SECRET: z.string().default("replace-me"),
+});
+
+export const env = envSchema.parse(process.env);
+export const isProduction = env.NODE_ENV === "production";
