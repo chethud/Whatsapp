@@ -12,6 +12,32 @@ function apiUnreachableMessage() {
   return `Cannot reach API at ${API_BASE_URL}. Make sure the backend is running on port 4000.`;
 }
 
+async function readApiPayload(response: Response): Promise<{ success?: boolean; data?: unknown; error?: string }> {
+  const text = await response.text();
+  if (!text) {
+    return {
+      success: response.ok,
+      error: response.ok ? undefined : `Request failed (${response.status})`,
+    };
+  }
+
+  try {
+    return JSON.parse(text) as { success?: boolean; data?: unknown; error?: string };
+  } catch {
+    const trimmed = text.trim();
+    if (/too many requests/i.test(trimmed)) {
+      return {
+        success: false,
+        error: "Too many requests. Please wait a minute and try again.",
+      };
+    }
+    return {
+      success: false,
+      error: trimmed.slice(0, 180) || `Request failed (${response.status})`,
+    };
+  }
+}
+
 async function fetchWithRetry(url: string, init?: RequestInit) {
   const maxAttempts = IS_REMOTE_API ? 4 : 1;
   let lastError: unknown;
@@ -44,8 +70,11 @@ async function getCsrfToken() {
   }).catch(() => {
     throw new Error(apiUnreachableMessage());
   });
-  const payload = await response.json();
-  return payload.data.csrfToken as string;
+  const payload = await readApiPayload(response);
+  if (!response.ok || payload.success === false) {
+    throw new Error(payload.error ?? "Failed to get CSRF token");
+  }
+  return (payload.data as { csrfToken: string }).csrfToken;
 }
 
 async function refreshSession() {
@@ -61,7 +90,7 @@ async function refreshSession() {
     body: JSON.stringify(refreshToken ? { refreshToken } : {}),
   });
 
-  const payload = await response.json();
+  const payload = await readApiPayload(response);
   if (!response.ok || payload.success === false) {
     throw new Error(payload.error ?? "Session expired");
   }
@@ -104,7 +133,7 @@ export async function api<T>(path: string, init?: RequestInit, options?: ApiOpti
     throw new Error(apiUnreachableMessage());
   });
 
-  const payload = await response.json();
+  const payload = await readApiPayload(response);
   if (!response.ok || payload.success === false) {
     if (
       response.status === 401 &&

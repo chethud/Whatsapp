@@ -14,7 +14,9 @@ type SessionRecord = { id: string; name: string };
 type ChatRecord = { id: string; name: string | null; sessionId: string };
 
 export default function AiAssistantPage() {
-  const [prompt, setPrompt] = useState("Qualify this lead and answer their pricing questions.");
+  const [prompt, setPrompt] = useState(
+    "I am looking to buy a property.",
+  );
   const [reply, setReply] = useState("");
   const [sessionId, setSessionId] = useState("");
   const [chatId, setChatId] = useState("");
@@ -49,20 +51,30 @@ export default function AiAssistantPage() {
     }
   }, [chatId, chats.data?.items]);
 
+  const settings = useQuery({
+    queryKey: ["settings"],
+    queryFn: () => api<{ defaultAiProvider: string }>("/settings"),
+  });
+
   const replyMutation = useMutation({
     mutationFn: () =>
-      api<{ reply: string }>("/ai/reply", {
+      api<{ reply: string; model?: string; geminiConfigured?: boolean }>("/ai/reply", {
         method: "POST",
         body: JSON.stringify({
           sessionId,
           chatId,
           prompt,
-          provider: "OPENAI",
-          temperature: 0.4,
-          maxTokens: 500,
+          provider: settings.data?.defaultAiProvider ?? "GEMINI",
+          temperature: 0.3,
+          maxTokens: 120,
         }),
       }),
-    onSuccess: (data) => setReply(data.reply),
+    onSuccess: (data) => {
+      setReply(data.reply);
+      if (data.geminiConfigured === false) {
+        toast.message("Using Alliance Square flow (add GEMINI_API_KEY in apps/api/.env for Gemini)");
+      }
+    },
     onError: (error) => toast.error(error.message),
   });
 
@@ -114,6 +126,11 @@ export default function AiAssistantPage() {
       <div className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
         <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5">
           <h3 className="text-lg font-semibold">Generate AI reply</h3>
+          <p className="mt-1 text-sm text-slate-400">
+            Uses the Alliance Square sales flow. For free-form Gemini replies, set{" "}
+            <code className="text-slate-300">GEMINI_API_KEY</code> in{" "}
+            <code className="text-slate-300">apps/api/.env</code> and restart the API.
+          </p>
           <textarea
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
@@ -122,11 +139,11 @@ export default function AiAssistantPage() {
           />
           <button
             type="button"
-            disabled={!sessionId || !chatId}
+            disabled={!sessionId || !chatId || replyMutation.isPending}
             onClick={() => replyMutation.mutate()}
             className="mt-4 rounded-xl bg-blue-600 px-4 py-3 font-medium hover:bg-blue-500 disabled:opacity-60"
           >
-            Generate response
+            {replyMutation.isPending ? "Generating…" : "Generate response"}
           </button>
           {!sessionId || !chatId ? (
             <p className="mt-3 text-sm text-amber-300">

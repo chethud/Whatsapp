@@ -50,6 +50,7 @@ export function useRealtime() {
     socket.on(wsEventNames.dashboardUpdated, invalidateDashboard);
     socket.on(wsEventNames.sessionUpdate, () => {
       queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      queryClient.invalidateQueries({ queryKey: ["sessions-for-chats"] });
       invalidateDashboard();
     });
     socket.on(wsEventNames.qrUpdate, (_payload, sessionId?: string) => {

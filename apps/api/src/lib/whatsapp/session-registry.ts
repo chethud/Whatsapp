@@ -10,10 +10,11 @@ import { logger } from "../../config/logger.js";
 import { getIo } from "../../ws/socket.js";
 import { createNotification } from "../notifications.js";
 import { AppError } from "../errors.js";
+import { scheduleInboundAutoReply } from "../ai/auto-reply.js";
 import { resolvePuppeteerExecutablePath } from "./puppeteer.js";
 import { getWhatsappClientOptions, WWEBJS_AUTH_PATH } from "./client-options.js";
 
-const { Client, LocalAuth, Location, MessageMedia } = WhatsApp;
+const { Client, LocalAuth, Location, MessageMedia, Buttons, List } = WhatsApp;
 type WhatsappClient = InstanceType<typeof Client>;
 type WwebChat = Awaited<ReturnType<WhatsappClient["getChats"]>>[number];
 type Contact = Awaited<ReturnType<WwebChat["getContact"]>>;
@@ -214,6 +215,10 @@ class WhatsappSessionRegistry {
         body: `Session is now connected${info?.wid.user ? ` as ${info.wid.user}` : ""}.`,
         type: "SUCCESS",
       });
+
+      // WhatsApp Web chat list often loads a few seconds after "ready".
+      // Retry sync until chats appear (or attempts are exhausted).
+      void this.schedulePostReadyChatSync(sessionId);
     });
 
     client.on("authenticated", async () => {
@@ -252,12 +257,34 @@ class WhatsappSessionRegistry {
     });
 
     client.on("message", async (message) => {
+      // Only customer messages — bot owns the reply path.
+      if (message.fromMe) {
+        return;
+      }
+      try {
       await this.persistInboundMessage(sessionId, message);
+      } catch (error) {
+        logger.error("Failed to process inbound WhatsApp message", {
+          sessionId,
+          error: error instanceof Error ? { name: error.name, message: error.message } : error,
+        });
+      }
     });
 
     client.on("message_create", async (message) => {
       if (message.fromMe) {
         await this.persistOutboundEcho(sessionId, message);
+      }
+    });
+
+    client.on("vote_update", async (vote) => {
+      try {
+        await this.handlePollVote(sessionId, vote);
+      } catch (error) {
+        logger.error("Failed to process poll vote", {
+          sessionId,
+          error: error instanceof Error ? { name: error.name, message: error.message } : error,
+        });
       }
     });
 
@@ -377,8 +404,10 @@ class WhatsappSessionRegistry {
   async sendMessage(input: {
     sessionId: string;
     chatId: string;
-    type: "TEXT" | "IMAGE" | "PDF" | "AUDIO" | "VIDEO" | "LOCATION" | "CONTACT";
+    type: "TEXT" | "IMAGE" | "PDF" | "AUDIO" | "VIDEO" | "LOCATION" | "CONTACT" | "BUTTONS";
     content?: string;
+    buttons?: string[];
+    allOptions?: string[];
     mediaUrl?: string;
     mimeType?: string;
     fileName?: string;
@@ -418,11 +447,365 @@ class WhatsappSessionRegistry {
       payload = `${input.contactName}\n${input.contactPhone}`;
     }
 
+    if (input.type === "BUTTONS") {
+      const buttonOptions = (input.buttons ?? []).map((label) => label.trim()).filter(Boolean).slice(0, 3);
+      const allOptions = (input.allOptions?.length ? input.allOptions : buttonOptions)
+        .map((label) => label.trim())
+        .filter(Boolean);
+      const body = input.content?.trim() || "Please choose an option:";
+      if (!buttonOptions.length && !allOptions.length) {
+        const result = await managed.client.sendMessage(input.chatId, body as never, {
+          quotedMessageId: input.quotedMessageId,
+        });
+        return this.persistOutboundResult(input, result);
+      }
+      return this.sendChoiceMessage(
+        managed.client,
+        { ...input, type: "BUTTONS" as const },
+        body,
+        buttonOptions,
+        allOptions,
+      );
+    }
+
     const result = await managed.client.sendMessage(input.chatId, payload as never, {
       quotedMessageId: input.quotedMessageId,
     });
 
-    return this.persistMessageRecord(input.sessionId, result, MessageDirection.OUTBOUND);
+    return this.persistOutboundResult(input, result);
+  }
+
+  private async persistOutboundResult(
+    input: {
+      sessionId: string;
+      chatId: string;
+      type: "TEXT" | "IMAGE" | "PDF" | "AUDIO" | "VIDEO" | "LOCATION" | "CONTACT" | "BUTTONS";
+      content?: string;
+      buttons?: string[];
+      mediaUrl?: string;
+      mimeType?: string;
+      fileName?: string;
+      latitude?: number;
+      longitude?: number;
+    },
+    result: Message | null | undefined,
+  ) {
+    // Never invent a second bubble with "opt1 | opt2" — that caused duplicate replies.
+    const localContent = (input.content ?? "").trim();
+
+    try {
+      if (!result) {
+        return await this.persistLocalOutbound({
+          ...input,
+          type: input.type === "BUTTONS" ? "TEXT" : input.type,
+          content: localContent,
+        });
+      }
+      return await this.persistMessageRecord(input.sessionId, result, MessageDirection.OUTBOUND);
+    } catch (error) {
+      logger.warn("WhatsApp message sent but local persist failed", {
+        sessionId: input.sessionId,
+        chatId: input.chatId,
+        error: error instanceof Error ? { name: error.name, message: error.message } : error,
+      });
+      return this.persistLocalOutbound({
+        ...input,
+        type: input.type === "BUTTONS" ? "TEXT" : input.type,
+        content: localContent,
+      });
+    }
+  }
+
+  /** Prefer Buttons, then List (supports Other), then numbered text. Avoid polls — votes often don't continue the chat. */
+  private async sendChoiceMessage(
+    client: WhatsappClient,
+    input: {
+      sessionId: string;
+      chatId: string;
+      type: "BUTTONS";
+      content?: string;
+      buttons?: string[];
+      allOptions?: string[];
+      quotedMessageId?: string;
+    },
+    body: string,
+    buttonOptions: string[],
+    allOptions: string[],
+  ) {
+    const listOptions = allOptions.length ? allOptions : buttonOptions;
+    const attempts: Array<{ mode: string; build: () => unknown }> = [
+      {
+        mode: "buttons",
+        build: () =>
+          new Buttons(
+            body,
+            buttonOptions.map((label) => ({ id: label, body: label })),
+            "",
+            "Tap to select",
+          ),
+      },
+      {
+        mode: "list",
+        build: () =>
+          new List(
+            body,
+            "Select",
+            [
+              {
+                title: "Options",
+                rows: listOptions.map((label) => ({
+                  id: label,
+                  title: label,
+                  description: "",
+                })),
+              },
+            ],
+            "Alliance Square",
+            "",
+          ),
+      },
+      {
+        mode: "text",
+        // Keep only the human sentence — never append keyword menus.
+        build: () => body,
+      },
+    ];
+
+    let lastError: unknown;
+    for (const attempt of attempts) {
+      try {
+        const payload = attempt.build();
+        const result = await client.sendMessage(input.chatId, payload as never, {
+          quotedMessageId: input.quotedMessageId,
+        });
+        // Empty result often means the interactive payload was rejected after a partial send.
+        // Fall through to the next mode instead of saving a fake duplicate bubble.
+        if (!result) {
+          throw new Error("Empty WhatsApp send result");
+        }
+        logger.info("Choice message sent", {
+          sessionId: input.sessionId,
+          chatId: input.chatId,
+          mode: attempt.mode,
+          options: attempt.mode === "buttons" ? buttonOptions : listOptions,
+        });
+        return this.persistOutboundResult(input, result);
+      } catch (error) {
+        lastError = error;
+        logger.warn("Choice message send attempt failed", {
+          sessionId: input.sessionId,
+          attempt: attempt.mode,
+          error: error instanceof Error ? error.message : error,
+        });
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new AppError(500, "Failed to send choice options");
+  }
+
+  private async handlePollVote(sessionId: string, vote: any) {
+    const selected = this.extractPollSelection(vote);
+    if (!selected) {
+      logger.info("Ignoring poll vote without selectable option", { sessionId });
+      return;
+    }
+
+    const chatExternalId = await this.resolvePollVoteChatId(sessionId, vote);
+    if (!chatExternalId || chatExternalId.includes("@g.us")) {
+      logger.warn("Poll vote missing chat id", {
+        sessionId,
+        voter: vote?.voter,
+        parentTo: vote?.parentMessage?.to,
+        parentFrom: vote?.parentMessage?.from,
+      });
+      return;
+    }
+
+    const managed = this.sessions.get(sessionId);
+    const myId = managed?.client?.info?.wid?._serialized;
+    if (myId && (vote?.voter === myId || chatExternalId === myId)) {
+      return;
+    }
+
+    const chat = await this.findOrCreateDirectChat(sessionId, chatExternalId);
+
+    const externalId = `poll-vote-${String(vote?.parentMsgKey?.id || vote?.parentMessage?.id?.id || "x")}-${String(vote?.voter || "u")}-${selected}-${String(vote?.interractedAtTs || Date.now())}`;
+    const saved = await prisma.message.upsert({
+      where: { externalId },
+      update: { content: selected },
+      create: {
+        externalId,
+        sessionId,
+        chatId: chat.id,
+        direction: MessageDirection.INBOUND,
+        type: MessageType.TEXT,
+        content: selected,
+        status: "received",
+        sentAt: new Date(),
+        metadata: { source: "poll_vote", selected },
+      },
+    });
+
+    logger.info("Poll vote converted to inbound message", {
+      sessionId,
+      chatId: chat.id,
+      externalId: chat.externalId,
+      selected,
+    });
+
+    getIo().to(`session:${sessionId}`).emit(wsEventNames.messageCreated, saved);
+    getIo().to(`session:${sessionId}`).emit(wsEventNames.chatUpdated, chat);
+
+    scheduleInboundAutoReply({
+      sessionId,
+      chat,
+      message: saved,
+      sendMessage: (payload) => this.sendMessage(payload),
+      ensureConnected: (id) => this.restoreSessionIfNeeded(id),
+    });
+  }
+
+  private extractPollSelection(vote: any): string | null {
+    const named = vote?.selectedOptions?.find((option: any) => typeof option?.name === "string" && option.name.trim());
+    if (named?.name) {
+      return String(named.name).trim();
+    }
+
+    const localId =
+      vote?.selectedOptions?.[0]?.localId ??
+      vote?.selectedOptions?.[0]?.id ??
+      vote?.selectedOptionLocalIds?.[0];
+    const pollOptions = vote?.parentMessage?.pollOptions || vote?.parentMessage?._data?.pollOptions || [];
+    if (localId !== undefined && Array.isArray(pollOptions)) {
+      const match = pollOptions.find(
+        (option: any) => option?.localId === localId || option?.id === localId || option?.name,
+      );
+      const byLocal = pollOptions.find((option: any) => option?.localId === localId);
+      const option = byLocal || match;
+      if (option?.name) {
+        return String(option.name).trim();
+      }
+    }
+
+    return null;
+  }
+
+  private async resolvePollVoteChatId(sessionId: string, vote: any): Promise<string | undefined> {
+    const parent = vote?.parentMessage;
+    // Poll was sent by us → customer chat is usually `to`.
+    const candidates = [
+      parent?.to,
+      parent?.id?.remote,
+      parent?._data?.to,
+      vote?.parentMsgKey?.remote,
+      vote?.voter,
+      parent?.from,
+    ].filter((value): value is string => typeof value === "string" && value.length > 3);
+
+    for (const candidate of candidates) {
+      const existing = await prisma.chat.findFirst({
+        where: { sessionId, externalId: candidate },
+      });
+      if (existing) {
+        return existing.externalId;
+      }
+    }
+
+    // Match by phone digits when @c.us / @lid ids differ.
+    for (const candidate of candidates) {
+      const digits = candidate.replace(/\D/g, "");
+      if (digits.length < 8) {
+        continue;
+      }
+      const chats = await prisma.chat.findMany({
+        where: { sessionId, type: ChatType.DIRECT },
+        include: { contact: true },
+        orderBy: { lastMessageAt: "desc" },
+        take: 50,
+      });
+      const matched = chats.find((chat) => {
+        const idDigits = chat.externalId.replace(/\D/g, "");
+        const phoneDigits = chat.contact?.phoneNumber?.replace(/\D/g, "") ?? "";
+        return idDigits.endsWith(digits.slice(-10)) || phoneDigits.endsWith(digits.slice(-10));
+      });
+      if (matched) {
+        return matched.externalId;
+      }
+    }
+
+    return candidates[0];
+  }
+
+  private async findOrCreateDirectChat(sessionId: string, chatExternalId: string) {
+    const existing = await prisma.chat.findFirst({
+      where: { sessionId, externalId: chatExternalId },
+    });
+    if (existing) {
+      return prisma.chat.update({
+        where: { id: existing.id },
+        data: { lastMessageAt: new Date() },
+      });
+    }
+
+    return prisma.chat.upsert({
+      where: { externalId: chatExternalId },
+      update: { lastMessageAt: new Date(), sessionId },
+      create: {
+        externalId: chatExternalId,
+        sessionId,
+        type: ChatType.DIRECT,
+        lastMessageAt: new Date(),
+      },
+    });
+  }
+
+  private async persistLocalOutbound(input: {
+    sessionId: string;
+    chatId: string;
+    type: "TEXT" | "IMAGE" | "PDF" | "AUDIO" | "VIDEO" | "LOCATION" | "CONTACT";
+    content?: string;
+    mediaUrl?: string;
+    mimeType?: string;
+    fileName?: string;
+    latitude?: number;
+    longitude?: number;
+  }) {
+    const chat =
+      (await prisma.chat.findFirst({
+        where: {
+          sessionId: input.sessionId,
+          OR: [{ externalId: input.chatId }, { id: input.chatId }],
+        },
+      })) ??
+      (await prisma.chat.create({
+        data: {
+          externalId: input.chatId,
+          sessionId: input.sessionId,
+          type: input.chatId.includes("@g.us") ? ChatType.GROUP : ChatType.DIRECT,
+          lastMessageAt: new Date(),
+        },
+      }));
+
+    const saved = await prisma.message.create({
+      data: {
+        sessionId: input.sessionId,
+        chatId: chat.id,
+        direction: MessageDirection.OUTBOUND,
+        type: input.type,
+        content: input.content,
+        mediaUrl: input.mediaUrl,
+        mimeType: input.mimeType,
+        fileName: input.fileName,
+        latitude: input.latitude,
+        longitude: input.longitude,
+        status: "sent",
+        sentAt: new Date(),
+      },
+    });
+
+    getIo().to(`session:${input.sessionId}`).emit(wsEventNames.messageCreated, saved);
+    getIo().to(`session:${input.sessionId}`).emit(wsEventNames.chatUpdated, chat);
+    return saved;
   }
 
   async listChats(sessionId: string, search?: string) {
@@ -433,6 +816,8 @@ class WhatsappSessionRegistry {
           ? [
               { name: { contains: search, mode: "insensitive" } },
               { externalId: { contains: search, mode: "insensitive" } },
+              { contact: { phoneNumber: { contains: search, mode: "insensitive" } } },
+              { contact: { name: { contains: search, mode: "insensitive" } } },
             ]
           : undefined,
       },
@@ -443,67 +828,570 @@ class WhatsappSessionRegistry {
 
   async syncChats(sessionId: string) {
     const session = await prisma.whatsappSession.findUnique({ where: { id: sessionId } });
-    if (!session || session.status !== SessionStatus.CONNECTED) {
+    if (!session) {
+      throw new AppError(404, "WhatsApp session not found");
+    }
+    if (session.status !== SessionStatus.CONNECTED) {
       throw new AppError(400, "Connect WhatsApp before syncing chats");
     }
 
-    const managed = this.sessions.get(sessionId);
-    if (!managed?.initialized) {
-      throw new AppError(400, "Session is not connected");
-    }
-
     try {
-      const chats = await managed.client.getChats();
-      for (const chat of chats) {
-        await this.upsertChat(sessionId, chat);
+      const managed = await this.ensureClientReady(sessionId);
+      const state = await managed.client.getState().catch(() => null);
+      if (state && state !== "CONNECTED") {
+        throw new AppError(400, `WhatsApp is ${state}. Wait until CONNECTED, then sync again.`);
       }
-      return this.listChats(sessionId);
+
+      await this.waitForChatStore(managed.client);
+
+      let chats = await this.fetchChatsSafely(managed.client);
+      // WhatsApp Web sometimes hydrates the Store a few seconds after ready.
+      if (chats.length === 0) {
+        for (let attempt = 0; attempt < 8 && chats.length === 0; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+          await this.waitForChatStore(managed.client);
+          chats = await this.fetchChatsSafely(managed.client);
+        }
+      }
+
+      let synced = 0;
+      let messagesSynced = 0;
+
+      for (const chat of chats) {
+        try {
+          const savedChat = await this.upsertChatRecord(sessionId, chat);
+          synced += 1;
+          // Sync messages for the first N chats fully; skip heavy history for the rest to finish faster.
+          if (synced <= 120) {
+            messagesSynced += await this.syncRecentMessagesForChat(
+              sessionId,
+              managed.client,
+              savedChat.externalId,
+              savedChat.id,
+            );
+          }
+        } catch (error) {
+          logger.warn("Skipped chat during sync", {
+            sessionId,
+            chatId: chat.externalId,
+            error: serializeError(error),
+          });
+        }
+      }
+
+      const items = await this.listChats(sessionId);
+      logger.info("Synced chats from WhatsApp", {
+        sessionId,
+        synced,
+        total: chats.length,
+        messagesSynced,
+        inboxCount: items.length,
+      });
+
+      try {
+        getIo().to(`session:${sessionId}`).emit(wsEventNames.chatUpdated, {
+          sessionId,
+          synced,
+          inboxCount: items.length,
+        });
+        getIo().emit(wsEventNames.dashboardUpdated);
+      } catch {
+        // socket may not be ready during early boot
+      }
+
+      return {
+        items,
+        synced,
+        totalFromPhone: chats.length,
+        messagesSynced,
+      };
     } catch (error) {
-      logger.error("Failed to sync chats from WhatsApp", { sessionId, error });
-      throw new AppError(502, "Failed to sync chats from WhatsApp");
+      if (error instanceof AppError) {
+        throw error;
+      }
+
+      logger.error("Failed to sync chats from WhatsApp", {
+        sessionId,
+        error: serializeError(error),
+      });
+      throw new AppError(502, `Failed to sync chats from WhatsApp: ${errorMessage(error)}`);
     }
   }
 
-  private async upsertChat(sessionId: string, chat: WwebChat) {
-    const contact = !chat.isGroup ? await chat.getContact().catch(() => null) : null;
-    let contactId: string | undefined;
+  private async schedulePostReadyChatSync(sessionId: string) {
+    const attemptDelaysMs = [5_000, 12_000, 22_000, 35_000];
 
-    if (contact) {
-      const phoneNumber = contact.number || contact.id?.user;
+    for (let index = 0; index < attemptDelaysMs.length; index++) {
+      const waitMs =
+        index === 0 ? attemptDelaysMs[0] : attemptDelaysMs[index] - attemptDelaysMs[index - 1];
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+
+      try {
+        const result = await this.syncChats(sessionId);
+        logger.info("Post-ready chat sync attempt finished", {
+          sessionId,
+          attempt: index + 1,
+          synced: result.synced,
+          inboxCount: result.items.length,
+        });
+        if (result.synced > 0 || result.items.length > 0) {
+          return;
+        }
+      } catch (error) {
+        logger.warn("Post-ready chat sync attempt failed", {
+          sessionId,
+          attempt: index + 1,
+          error: serializeError(error),
+        });
+      }
+    }
+  }
+
+  private async ensureClientReady(sessionId: string) {
+    if (!this.sessions.get(sessionId)?.initialized) {
+      await this.restoreSessionIfNeeded(sessionId);
+    }
+
+    for (let attempt = 0; attempt < 30; attempt++) {
+    const managed = this.sessions.get(sessionId);
+      if (managed?.initialized) {
+        const state = await managed.client.getState().catch(() => null);
+        if (!state || state === "CONNECTED") {
+          return managed;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+
+    throw new AppError(400, "WhatsApp client is not ready in memory. Reconnect the session and try again.");
+  }
+
+  private async waitForChatStore(client: WhatsappClient) {
+    const page = (client as { pupPage?: { evaluate: <T>(fn: () => T | Promise<T>) => Promise<T> } }).pupPage;
+    if (!page) {
+      return;
+    }
+
+    for (let attempt = 0; attempt < 12; attempt++) {
+      const ready = await page
+        .evaluate(() => {
+          const store = (globalThis as unknown as {
+            Store?: {
+              Chat?: {
+                getModelsArray?: () => unknown[];
+                models?: unknown[] | Record<string, unknown>;
+              };
+            };
+          }).Store;
+          const fromArray = store?.Chat?.getModelsArray?.() ?? [];
+          const models = Array.isArray(fromArray) && fromArray.length
+            ? fromArray
+            : Array.isArray(store?.Chat?.models)
+              ? store.Chat.models
+              : Object.values((store?.Chat?.models as Record<string, unknown>) || {});
+          return Array.isArray(models) && models.length > 0;
+        })
+        .catch(() => false);
+
+      if (ready) {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 800));
+    }
+  }
+
+  private async syncRecentMessagesForChat(
+    sessionId: string,
+    client: WhatsappClient,
+    chatExternalId: string,
+    chatId: string,
+  ) {
+    try {
+      const chat = await client.getChatById(chatExternalId);
+      const messages = await chat.fetchMessages({ limit: 80 });
+      let count = 0;
+
+      for (const message of messages) {
+        try {
+          const direction = message.fromMe ? MessageDirection.OUTBOUND : MessageDirection.INBOUND;
+          const externalMessageId =
+            message.id?._serialized ||
+            message.id?.id ||
+            `${chatExternalId}-${message.timestamp}-${message.body?.slice(0, 12)}`;
+          if (!externalMessageId) {
+            continue;
+          }
+
+          await prisma.message.upsert({
+            where: { externalId: String(externalMessageId) },
+            update: {
+              content: message.body ?? undefined,
+              status: message.ack?.toString() ?? "synced",
+              chatId,
+              sessionId,
+            },
+            create: {
+              externalId: String(externalMessageId),
+              sessionId,
+              chatId,
+              direction,
+              type: this.mapMessageType(message.type || "chat"),
+              content: message.body ?? null,
+              status: message.ack?.toString() ?? "synced",
+              sentAt: message.timestamp ? new Date(message.timestamp * 1000) : new Date(),
+            },
+          });
+          count += 1;
+        } catch {
+          // skip individual message failures
+        }
+      }
+
+      return count;
+    } catch (error) {
+      logger.warn("Failed to sync messages for chat", {
+        sessionId,
+        chatExternalId,
+        error: serializeError(error),
+      });
+      return 0;
+    }
+  }
+
+  private async fetchChatsSafely(client: WhatsappClient) {
+    const byId = new Map<
+      string,
+      {
+        externalId: string;
+        name?: string | null;
+        isGroup: boolean;
+        unreadCount: number;
+        archived: boolean;
+        pinned: boolean;
+        timestamp?: number;
+        phoneNumber?: string;
+        getContact?: () => Promise<Contact | null>;
+      }
+    >();
+
+    try {
+      const chats = await client.getChats();
+      for (const chat of chats) {
+        try {
+          const base = this.mapWwebChat(chat);
+          if (!base.isGroup && (!base.phoneNumber || looksLikeWhatsappId(base.phoneNumber))) {
+            const resolved = await this.resolvePhoneFromClient(client, base.externalId).catch(() => undefined);
+            if (resolved) {
+              base.phoneNumber = resolved;
+            }
+          }
+          byId.set(base.externalId, base);
+    } catch (error) {
+          logger.warn("Skipped chat while mapping getChats result", {
+            error: serializeError(error),
+          });
+        }
+      }
+    } catch (primaryError) {
+      logger.warn("client.getChats failed, will use Store fallback", {
+        error: serializeError(primaryError),
+      });
+    }
+
+    // Always merge Store chats — getChats can succeed with [] while Store still has history.
+    const storeChats = await this.fetchChatsFromStore(client).catch((error) => {
+      logger.warn("Store chat fallback failed", { error: serializeError(error) });
+      return [] as Array<{
+        externalId: string;
+        name?: string | null;
+        isGroup: boolean;
+        unreadCount: number;
+        archived: boolean;
+        pinned: boolean;
+        timestamp?: number;
+        phoneNumber?: string;
+      }>;
+    });
+
+    for (const chat of storeChats) {
+      const existing = byId.get(chat.externalId);
+      if (!existing) {
+        byId.set(chat.externalId, chat);
+        continue;
+      }
+      byId.set(chat.externalId, {
+        ...existing,
+        name: existing.name || chat.name,
+        phoneNumber: existing.phoneNumber || chat.phoneNumber,
+        unreadCount: Math.max(existing.unreadCount, chat.unreadCount),
+        archived: existing.archived || chat.archived,
+        pinned: existing.pinned || chat.pinned,
+        timestamp: Math.max(existing.timestamp ?? 0, chat.timestamp ?? 0) || existing.timestamp,
+      });
+    }
+
+    const merged = [...byId.values()];
+    for (const chat of merged) {
+      if (!chat.isGroup && (!chat.phoneNumber || looksLikeWhatsappId(chat.phoneNumber))) {
+        const resolved = await this.resolvePhoneFromClient(client, chat.externalId).catch(() => undefined);
+        if (resolved) {
+          chat.phoneNumber = resolved;
+        }
+      }
+    }
+
+    return merged;
+  }
+
+  private async fetchChatsFromStore(client: WhatsappClient) {
+    const page = (client as { pupPage?: { evaluate: <T>(fn: () => T | Promise<T>) => Promise<T> } }).pupPage;
+    if (!page) {
+      return [];
+    }
+
+    return page.evaluate(() => {
+      type StoreChat = {
+        id?: { _serialized?: string; server?: string; user?: string };
+        name?: string;
+        formattedTitle?: string;
+        isGroup?: boolean;
+        unreadCount?: number;
+        archived?: boolean;
+        pinned?: boolean;
+        timestamp?: number;
+        t?: number;
+        contact?: {
+          number?: string;
+          phoneNumber?: string;
+          name?: string;
+          pushname?: string;
+        };
+      };
+
+      const root = globalThis as unknown as {
+        Store?: {
+          Chat?: {
+            getModelsArray?: () => StoreChat[];
+            models?: StoreChat[] | Record<string, StoreChat>;
+            _models?: StoreChat[];
+            toArray?: () => StoreChat[];
+          };
+          Contact?: {
+            get?: (id: unknown) => {
+              number?: string;
+              phoneNumber?: string;
+              name?: string;
+              pushname?: string;
+            } | undefined;
+          };
+        };
+        WWebJS?: {
+          getChats?: () => Promise<Array<{ id?: { _serialized?: string } } & StoreChat>>;
+        };
+      };
+
+      const store = root.Store;
+      const candidates: StoreChat[] = [];
+      const pushAll = (items: unknown) => {
+        if (!items) {
+          return;
+        }
+        if (Array.isArray(items)) {
+          candidates.push(...(items as StoreChat[]));
+          return;
+        }
+        if (typeof items === "object") {
+          candidates.push(...(Object.values(items) as StoreChat[]));
+        }
+      };
+
+      pushAll(store?.Chat?.getModelsArray?.());
+      pushAll(store?.Chat?.toArray?.());
+      pushAll(store?.Chat?._models);
+      pushAll(store?.Chat?.models);
+
+      const seen = new Set<string>();
+      return candidates
+        .map((chat) => {
+          const externalId = chat?.id?._serialized;
+          if (!externalId || seen.has(externalId)) {
+            return null;
+          }
+          seen.add(externalId);
+
+          if (externalId.includes("status@broadcast") || externalId.endsWith("@newsletter")) {
+            return null;
+          }
+
+          const isGroup = Boolean(chat.isGroup || chat.id?.server === "g.us");
+          const contact = chat.contact || (chat.id && store?.Contact?.get?.(chat.id)) || undefined;
+          const phoneRaw =
+            contact?.number ||
+            contact?.phoneNumber ||
+            (chat.id?.server === "c.us" ? chat.id.user : undefined);
+
+          return {
+            externalId,
+            name: chat.name || chat.formattedTitle || contact?.pushname || contact?.name || undefined,
+            isGroup,
+            unreadCount: chat.unreadCount ?? 0,
+            archived: Boolean(chat.archived),
+            pinned: Boolean(chat.pinned),
+            timestamp: chat.timestamp ?? chat.t,
+            phoneNumber: phoneRaw ? String(phoneRaw).replace(/\D/g, "") : undefined,
+          };
+        })
+        .filter((chat): chat is NonNullable<typeof chat> => Boolean(chat));
+    });
+  }
+
+  private async resolvePhoneFromClient(client: WhatsappClient, externalId: string) {
+    const page = (client as { pupPage?: { evaluate: <T>(fn: (id: string) => T | Promise<T>, id: string) => Promise<T> } })
+      .pupPage;
+    if (!page) {
+      return undefined;
+    }
+
+    const phone = await page.evaluate((id) => {
+      type PhoneContact = {
+        number?: string;
+        phoneNumber?: string;
+        id?: { user?: string; server?: string };
+      };
+      const store = (globalThis as unknown as {
+        Store?: {
+          WidFactory?: { createWid?: (value: string) => unknown };
+          Contact?: {
+            get?: (wid: unknown) => PhoneContact | undefined;
+            find?: (wid: unknown) => Promise<PhoneContact | null>;
+          };
+          Chat?: {
+            get?: (wid: unknown) => { contact?: PhoneContact } | undefined;
+          };
+        };
+      }).Store;
+
+      try {
+        const wid = store?.WidFactory?.createWid?.(id) ?? id;
+        const contact = store?.Contact?.get?.(wid) || store?.Chat?.get?.(wid)?.contact;
+        const raw = contact?.number || contact?.phoneNumber || contact?.id?.user;
+        if (raw && !String(raw).includes("@") && !String(id).endsWith("@lid")) {
+          return String(raw).replace(/\D/g, "");
+        }
+        if (raw && String(contact?.id?.server) === "c.us") {
+          return String(raw).replace(/\D/g, "");
+        }
+        if (contact?.number) {
+          return String(contact.number).replace(/\D/g, "");
+        }
+        if (contact?.phoneNumber) {
+          return String(contact.phoneNumber).replace(/\D/g, "");
+        }
+      } catch {
+        return null;
+      }
+      return null;
+    }, externalId);
+
+    return phone || undefined;
+  }
+
+  private mapWwebChat(chat: WwebChat) {
+    const externalId = chat.id._serialized;
+    const isGroup = Boolean(chat.isGroup);
+    let phoneNumber: string | undefined;
+
+    if (!isGroup) {
+      if (externalId.endsWith("@c.us")) {
+        phoneNumber = externalId.split("@")[0]?.replace(/\D/g, "");
+      }
+    }
+
+    return {
+      externalId,
+      name: chat.name || undefined,
+      isGroup,
+      unreadCount: chat.unreadCount ?? 0,
+      archived: Boolean(chat.archived),
+      pinned: Boolean(chat.pinned),
+      timestamp: chat.timestamp,
+      phoneNumber,
+      getContact: () => chat.getContact(),
+    };
+  }
+
+  private async upsertChat(sessionId: string, chat: WwebChat) {
+    return this.upsertChatRecord(sessionId, this.mapWwebChat(chat));
+  }
+
+  private async upsertChatRecord(
+    sessionId: string,
+    chat: {
+      externalId: string;
+      name?: string | null;
+      isGroup: boolean;
+      unreadCount: number;
+      archived: boolean;
+      pinned: boolean;
+      timestamp?: number;
+      phoneNumber?: string;
+      getContact?: () => Promise<Contact | null>;
+    },
+  ) {
+    let contactId: string | undefined;
+    let displayName = chat.name?.trim() || undefined;
+
+    if (!chat.isGroup) {
+      const contact = chat.getContact ? await chat.getContact().catch(() => null) : null;
+      const phoneNumber = normalizePhoneNumber(
+        contact?.number ||
+          (contact as { phoneNumber?: string } | null)?.phoneNumber ||
+          chat.phoneNumber ||
+          (chat.externalId.endsWith("@c.us") ? chat.externalId.split("@")[0] : undefined),
+      );
+
       if (phoneNumber) {
+        const contactLabel =
+          [contact?.pushname, contact?.name].find((value) => value && !looksLikeWhatsappId(value)) ||
+          phoneNumber;
+
         const savedContact = await prisma.contact.upsert({
           where: { phoneNumber },
-          update: {
-            name: contact.pushname || contact.name || contact.number,
-          },
+          update: { name: contactLabel },
           create: {
-            name: contact.pushname || contact.name || contact.number,
+            name: contactLabel,
             phoneNumber,
             labels: [],
           },
         });
         contactId = savedContact.id;
+        // Heading should show the phone number for direct chats.
+        displayName = formatPhoneDisplay(phoneNumber);
+      } else if (!displayName || looksLikeWhatsappId(displayName)) {
+        displayName = chat.externalId.includes("@")
+          ? chat.externalId.split("@")[0]
+          : chat.externalId;
       }
     }
 
     return prisma.chat.upsert({
-      where: { externalId: chat.id._serialized },
+      where: { externalId: chat.externalId },
       update: {
-        name: chat.name,
+        name: displayName,
         unreadCount: chat.unreadCount,
         archived: chat.archived,
-        pinned: Boolean(chat.pinned),
+        pinned: chat.pinned,
         lastMessageAt: chat.timestamp ? new Date(chat.timestamp * 1000) : undefined,
         sessionId,
-        contactId,
+        ...(contactId ? { contactId } : {}),
         type: chat.isGroup ? ChatType.GROUP : ChatType.DIRECT,
       },
       create: {
-        externalId: chat.id._serialized,
-        name: chat.name,
+        externalId: chat.externalId,
+        name: displayName,
         unreadCount: chat.unreadCount,
         archived: chat.archived,
-        pinned: Boolean(chat.pinned),
+        pinned: chat.pinned,
         lastMessageAt: chat.timestamp ? new Date(chat.timestamp * 1000) : undefined,
         sessionId,
         contactId,
@@ -517,48 +1405,152 @@ class WhatsappSessionRegistry {
   }
 
   private async persistOutboundEcho(sessionId: string, message: Message) {
+    const externalId = message?.id?.id || message?.id?._serialized;
+    const body = typeof message?.body === "string" ? message.body.trim() : "";
+
+    if (externalId) {
     const existing = await prisma.message.findFirst({
-      where: { externalId: message.id.id, sessionId },
-    });
-    if (!existing) {
-      await this.persistMessageRecord(sessionId, message, MessageDirection.OUTBOUND);
+        where: { externalId: String(externalId), sessionId },
+      });
+      if (existing) {
+        return;
+      }
     }
+
+    // Avoid double-saving bot sends: sendMessage may persist first, then WhatsApp echoes.
+    if (body) {
+      const recentOutbound = await prisma.message.findMany({
+        where: {
+          sessionId,
+          direction: MessageDirection.OUTBOUND,
+          sentAt: { gte: new Date(Date.now() - 20_000) },
+        },
+        orderBy: { sentAt: "desc" },
+        take: 8,
+      });
+      const recentDuplicate = recentOutbound.find((item) => {
+        const existing = (item.content ?? "").trim();
+    if (!existing) {
+          return false;
+        }
+        if (existing === body) {
+          return true;
+        }
+        // Choice fallbacks / local persist can differ slightly from WhatsApp echo body.
+        return existing.startsWith(body) || body.startsWith(existing.split("\n")[0] ?? existing);
+      });
+      if (recentDuplicate) {
+        if (externalId && !recentDuplicate.externalId) {
+          await prisma.message.update({
+            where: { id: recentDuplicate.id },
+            data: { externalId: String(externalId) },
+          });
+        }
+        return;
+      }
+    }
+
+    if (!externalId) {
+      return;
+    }
+
+    await this.persistMessageRecord(sessionId, message, MessageDirection.OUTBOUND).catch((error) => {
+      logger.warn("Failed to persist outbound echo", {
+        sessionId,
+        error: error instanceof Error ? error.message : error,
+      });
+    });
   }
 
   private async persistMessageRecord(sessionId: string, message: Message, direction: MessageDirection) {
+    if (!message) {
+      throw new Error("Cannot persist empty WhatsApp message payload");
+    }
+
+    const chatExternalId =
+      direction === MessageDirection.OUTBOUND
+        ? message.to || message.from || message.id?.remote || message.id?._serialized
+        : message.from || message.to;
+
+    if (!chatExternalId || typeof chatExternalId !== "string") {
+      throw new Error("WhatsApp message is missing chat id");
+    }
+
+    const isGroup = chatExternalId.includes("@g.us");
+    let displayName = message._data?.notifyName as string | undefined;
+    let contactId: string | undefined;
+
+    if (!isGroup) {
+      const managed = this.sessions.get(sessionId);
+      const phoneFromId = chatExternalId.endsWith("@c.us")
+        ? normalizePhoneNumber(chatExternalId.split("@")[0])
+        : undefined;
+      const phoneFromClient = managed
+        ? await this.resolvePhoneFromClient(managed.client, chatExternalId).catch(() => undefined)
+        : undefined;
+      const phoneNumber = phoneFromClient || phoneFromId;
+
+      if (phoneNumber) {
+        displayName = formatPhoneDisplay(phoneNumber);
+        const contactLabel =
+          displayName && message._data?.notifyName && !looksLikeWhatsappId(String(message._data.notifyName))
+            ? String(message._data.notifyName)
+            : phoneNumber;
+        const savedContact = await prisma.contact.upsert({
+          where: { phoneNumber },
+          update: { name: contactLabel },
+          create: {
+            name: contactLabel,
+            phoneNumber,
+            labels: [],
+          },
+        });
+        contactId = savedContact.id;
+      } else if (displayName && looksLikeWhatsappId(displayName)) {
+        displayName = chatExternalId.split("@")[0];
+      }
+    }
+
+    const sentAt = message.timestamp ? new Date(message.timestamp * 1000) : new Date();
+
     const chat = await prisma.chat.upsert({
-      where: { externalId: message.fromMe ? message.to : message.from },
+      where: { externalId: chatExternalId },
       update: {
-        name: message._data.notifyName ?? undefined,
-        lastMessageAt: new Date(message.timestamp * 1000),
+        name: displayName ?? undefined,
+        lastMessageAt: sentAt,
         sessionId,
+        ...(contactId ? { contactId } : {}),
       },
       create: {
-        externalId: message.fromMe ? message.to : message.from,
-        name: message._data.notifyName ?? undefined,
+        externalId: chatExternalId,
+        name: displayName ?? undefined,
         sessionId,
-        type: message.from.includes("@g.us") ? ChatType.GROUP : ChatType.DIRECT,
-        lastMessageAt: new Date(message.timestamp * 1000),
+        type: isGroup ? ChatType.GROUP : ChatType.DIRECT,
+        lastMessageAt: sentAt,
+        contactId,
       },
     });
 
+    const externalMessageId =
+      message.id?.id || message.id?._serialized || message.id || `local-${Date.now()}-${Math.random()}`;
+
     const saved = await prisma.message.upsert({
-      where: { externalId: message.id.id },
+      where: { externalId: String(externalMessageId) },
       update: {
-        content: message.body,
+        content: this.extractInboundContent(message) ?? message.body,
         status: message.ack?.toString() ?? "sent",
-        metadata: message.rawData as object,
+        metadata: (message.rawData as object) ?? undefined,
       },
       create: {
-        externalId: message.id.id,
+        externalId: String(externalMessageId),
         sessionId,
         chatId: chat.id,
         direction,
-        type: this.mapMessageType(message.type),
-        content: message.body,
+        type: this.mapMessageType(message.type || "chat"),
+        content: this.extractInboundContent(message),
         status: message.ack?.toString() ?? "sent",
-        sentAt: new Date(message.timestamp * 1000),
-        metadata: message.rawData as object,
+        sentAt,
+        metadata: (message.rawData as object) ?? undefined,
       },
     });
 
@@ -571,8 +1563,37 @@ class WhatsappSessionRegistry {
         type: "INFO",
         metadata: { sessionId, chatId: chat.id, messageId: saved.id },
       });
+
+      scheduleInboundAutoReply({
+        sessionId,
+        chat,
+        message: saved,
+        sendMessage: (payload) => this.sendMessage(payload),
+        ensureConnected: (id) => this.restoreSessionIfNeeded(id),
+      });
     }
     return saved;
+  }
+
+  private extractInboundContent(message: Message): string | null {
+    const body = typeof message?.body === "string" ? message.body.trim() : "";
+    if (body) {
+      return body;
+    }
+    const selectedButton = typeof message?.selectedButtonId === "string" ? message.selectedButtonId.trim() : "";
+    if (selectedButton) {
+      return selectedButton;
+    }
+    const selectedRow =
+      typeof message?.listResponse?.singleSelectReply?.selectedRowId === "string"
+        ? message.listResponse.singleSelectReply.selectedRowId.trim()
+        : typeof message?.selectedRowId === "string"
+          ? message.selectedRowId.trim()
+          : "";
+    if (selectedRow) {
+      return selectedRow;
+    }
+    return null;
   }
 
   private async runHeartbeat() {
@@ -615,6 +1636,76 @@ class WhatsappSessionRegistry {
         return MessageType.TEXT;
     }
   }
+}
+
+function serializeError(error: unknown) {
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: error.message,
+      stack: error.stack,
+    };
+  }
+
+  if (typeof error === "object" && error !== null) {
+    return {
+      ...error,
+      message: errorMessage(error),
+    };
+  }
+
+  return { message: String(error) };
+}
+
+function errorMessage(error: unknown) {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+
+  if (typeof error === "object" && error !== null && "message" in error) {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === "string" && message.trim()) {
+      return message;
+    }
+  }
+
+  return "Unknown WhatsApp sync error";
+}
+
+function looksLikeWhatsappId(value: string) {
+  const normalized = value.trim().toLowerCase();
+  return (
+    normalized.includes("@") ||
+    normalized.includes("lid") ||
+    normalized.endsWith("c.us") ||
+    normalized.endsWith("g.us")
+  );
+}
+
+function normalizePhoneNumber(value?: string | null) {
+  if (!value) {
+    return undefined;
+  }
+
+  const raw = String(value).trim();
+  if (raw.includes("@lid") || raw.toLowerCase().endsWith("lid")) {
+    return undefined;
+  }
+
+  const digits = raw.replace(/\D/g, "");
+  if (!digits || digits.length < 8 || digits.length > 15) {
+    return undefined;
+  }
+
+  return digits;
+}
+
+function formatPhoneDisplay(phoneNumber: string) {
+  const digits = phoneNumber.replace(/\D/g, "");
+  if (digits.length > 10) {
+    return `+${digits}`;
+  }
+  return digits;
 }
 
 export const whatsappSessionRegistry = new WhatsappSessionRegistry();

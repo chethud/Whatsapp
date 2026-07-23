@@ -23,10 +23,10 @@ export default function SettingsPage() {
   });
 
   const [form, setForm] = useState<Settings>({
-    businessName: "WhatsApp Core Platform",
-    timezone: "UTC",
-    aiAutoReplyEnabled: false,
-    defaultAiProvider: "OPENAI",
+    businessName: "Alliance Square",
+    timezone: "Asia/Kolkata",
+    aiAutoReplyEnabled: true,
+    defaultAiProvider: "GEMINI",
     slackWebhookUrl: null,
   });
 
@@ -71,8 +71,11 @@ export default function SettingsPage() {
               checked={form.aiAutoReplyEnabled}
               onChange={(event) => setForm((state) => ({ ...state, aiAutoReplyEnabled: event.target.checked }))}
             />
-            Enable AI auto-reply
+            Bot auto-reply (full control of incoming WhatsApp chats)
           </label>
+          <p className="text-xs text-slate-400">
+            When enabled, Alliance Square bot automatically replies to every incoming direct chat and runs the full sales conversation.
+          </p>
           <select
             value={form.defaultAiProvider}
             onChange={(event) => setForm((state) => ({ ...state, defaultAiProvider: event.target.value }))}

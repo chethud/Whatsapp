@@ -44,7 +44,7 @@ export async function generateChatCompletion(input: AiRequest) {
       throw new AppError(500, "GEMINI_API_KEY is not configured");
     }
 
-    const model = input.model ?? "gemini-1.5-flash";
+    const model = input.model ?? "gemini-2.0-flash";
     const contents = input.messages
       .filter((message) => message.role !== "system")
       .map((message) => ({

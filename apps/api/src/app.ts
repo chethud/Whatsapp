@@ -43,9 +43,13 @@ export function createApp() {
   app.use(
     rateLimit({
       windowMs: 15 * 60 * 1000,
-      limit: 300,
+      limit: env.NODE_ENV === "production" ? 300 : 2000,
       standardHeaders: true,
       legacyHeaders: false,
+      message: {
+        success: false,
+        error: "Too many requests. Please wait a minute and try again.",
+      },
     }),
   );
   app.use(csrfProtection);

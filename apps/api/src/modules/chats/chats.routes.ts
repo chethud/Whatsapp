@@ -25,6 +25,8 @@ chatsRouter.get("/", validateQuery(paginationQuerySchema), async (req, res) => {
           OR: [
             { name: { contains: search, mode: "insensitive" as const } },
             { externalId: { contains: search, mode: "insensitive" as const } },
+            { contact: { is: { phoneNumber: { contains: search, mode: "insensitive" as const } } } },
+            { contact: { is: { name: { contains: search, mode: "insensitive" as const } } } },
           ],
         }
       : {}),

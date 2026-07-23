@@ -72,6 +72,10 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
   });
 }
 
+process.on("unhandledRejection", (error) => {
+  logger.error("Unhandled promise rejection", { error });
+});
+
 bootstrap().catch((error) => {
   logger.error("Failed to bootstrap API", { error });
   process.exit(1);

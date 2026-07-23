@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { DashboardShell } from "@/components/dashboard-shell";
@@ -17,6 +17,7 @@ type ChatRecord = {
   unreadCount: number;
   lastMessageAt: string | null;
   sessionId: string;
+  contact?: { name: string; phoneNumber: string } | null;
 };
 
 type MessageRecord = {
@@ -29,6 +30,88 @@ type MessageRecord = {
 
 type SessionRecord = { id: string; name: string; status: string };
 
+function formatPhoneDisplay(phone?: string | null) {
+  if (!phone) {
+    return null;
+  }
+  const digits = phone.replace(/\D/g, "");
+  if (!digits || digits.length < 8) {
+    return null;
+  }
+  return digits.length > 10 ? `+${digits}` : digits;
+}
+
+function getChatPhone(chat: ChatRecord) {
+  const fromContact = formatPhoneDisplay(chat.contact?.phoneNumber);
+  if (fromContact) {
+    return fromContact;
+  }
+
+  if (chat.externalId.endsWith("@c.us")) {
+    return formatPhoneDisplay(chat.externalId.split("@")[0]);
+  }
+
+  // Sometimes chat.name was stored as the phone display.
+  if (chat.name && /^\+?\d[\d\s-]{7,}$/.test(chat.name.trim())) {
+    return formatPhoneDisplay(chat.name);
+  }
+
+  return null;
+}
+
+function getChatDisplayName(chat: ChatRecord) {
+  const phone = getChatPhone(chat);
+  const contactName = chat.contact?.name?.trim() || "";
+  const chatName = chat.name?.trim() || "";
+
+  const looksLikeId = (value: string) =>
+    !value || value.includes("@") || /lid/i.test(value) || /^\+?\d[\d\s-]*$/.test(value);
+
+  if (contactName && !looksLikeId(contactName) && contactName !== phone) {
+    return contactName;
+  }
+
+  if (chatName && !looksLikeId(chatName) && chatName !== phone) {
+    return chatName;
+  }
+
+  return null;
+}
+
+function getChatHeading(chat: ChatRecord) {
+  const name = getChatDisplayName(chat);
+  const phone = getChatPhone(chat);
+
+  if (name && phone) {
+    return `${name} (${phone})`;
+  }
+  if (phone) {
+    return phone;
+  }
+  if (name) {
+    return name;
+  }
+
+  return chat.name ?? chat.externalId;
+}
+
+function getChatSubheading(chat: ChatRecord) {
+  const name = getChatDisplayName(chat);
+  const phone = getChatPhone(chat);
+
+  // Heading already includes name + phone when both exist.
+  if (name && phone) {
+    return chat.type;
+  }
+  if (phone) {
+    return `${phone} · ${chat.type}`;
+  }
+  if (name) {
+    return `${name} · ${chat.type}`;
+  }
+  return chat.type;
+}
+
 export default function ChatsPage() {
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
   const [message, setMessage] = useState("");
@@ -38,20 +121,35 @@ export default function ChatsPage() {
   const [debouncedMessageSearch, setDebouncedMessageSearch] = useState("");
   const queryClient = useQueryClient();
   const { subscribeSession } = useRealtime();
+  const autoSyncedSessions = useRef<Set<string>>(new Set());
+  const autoSyncAttempts = useRef<Record<string, number>>({});
 
   const sessions = useQuery({
     queryKey: ["sessions-for-chats"],
     queryFn: () => api<{ items: SessionRecord[] }>("/sessions?page=1&pageSize=50"),
+    refetchInterval: (query) => {
+      const items = query.state.data?.items ?? [];
+      const hasConnected = items.some((session) => session.status === "CONNECTED");
+      // Keep polling briefly until a session is connected after QR scan.
+      return hasConnected ? false : 3000;
+    },
   });
 
   useEffect(() => {
     const items = sessions.data?.items ?? [];
-    if (!items.length || sessionFilter) {
+    if (!items.length) {
       return;
     }
 
     const connected = items.find((session) => session.status === "CONNECTED");
-    setSessionFilter(connected?.id ?? items[0].id);
+    if (connected && sessionFilter !== connected.id) {
+      // Prefer the connected session after QR scan.
+      if (!sessionFilter || items.find((session) => session.id === sessionFilter)?.status !== "CONNECTED") {
+        setSessionFilter(connected.id);
+      }
+    } else if (!sessionFilter) {
+      setSessionFilter(connected?.id ?? items[0].id);
+    }
   }, [sessionFilter, sessions.data?.items]);
 
   const activeSession =
@@ -67,9 +165,17 @@ export default function ChatsPage() {
   const chats = useQuery({
     queryKey: ["chats", sessionFilter, chatSearch],
     enabled: Boolean(sessionFilter),
+    refetchInterval: (query) => {
+      // While inbox is empty after connect, keep refreshing so post-ready sync appears.
+      if (!isSessionConnected) {
+        return false;
+      }
+      const count = query.state.data?.items?.length ?? 0;
+      return count === 0 ? 4000 : false;
+    },
     queryFn: () =>
       api<{ items: ChatRecord[] }>(
-        `/chats?page=1&pageSize=100&sessionId=${sessionFilter}${
+        `/chats?page=1&pageSize=500&sessionId=${sessionFilter}${
           chatSearch ? `&search=${encodeURIComponent(chatSearch)}` : ""
         }`,
       ),
@@ -99,13 +205,73 @@ export default function ChatsPage() {
   });
 
   const syncMutation = useMutation({
-    mutationFn: () => api(`/chats/sync/${sessionFilter}`, { method: "POST", body: JSON.stringify({}) }),
-    onSuccess: () => {
-      toast.success("Chats synced");
+    mutationFn: () =>
+      api<{
+        items: ChatRecord[];
+        synced: number;
+        totalFromPhone: number;
+        messagesSynced: number;
+      }>(`/chats/sync/${sessionFilter}`, { method: "POST", body: JSON.stringify({}) }),
+    onSuccess: (data) => {
+      queryClient.setQueryData(["chats", sessionFilter, chatSearch], {
+        items: data.items,
+        total: data.items.length,
+      });
+      if (data.synced > 0) {
+        toast.success(`Synced ${data.synced} chats (${data.messagesSynced} messages) from phone`);
+      } else {
+        toast.message("WhatsApp is still loading chats. Retrying…");
+        autoSyncedSessions.current.delete(sessionFilter);
+      }
       queryClient.invalidateQueries({ queryKey: ["chats", sessionFilter] });
     },
-    onError: (error) => toast.error(error.message),
+    onError: (error) => {
+      autoSyncedSessions.current.delete(sessionFilter);
+      toast.error(error.message);
+    },
   });
+
+  // After connect, pull old chats (with retries while Store is still loading).
+  useEffect(() => {
+    if (!sessionFilter || !isSessionConnected || syncMutation.isPending) {
+      return;
+    }
+    if (chats.isLoading) {
+      return;
+    }
+    if ((chats.data?.items?.length ?? 0) > 0) {
+      return;
+    }
+
+    const attempts = autoSyncAttempts.current[sessionFilter] ?? 0;
+    if (attempts >= 5) {
+      return;
+    }
+
+    const delay = attempts === 0 ? 1500 : 5000;
+    const timer = window.setTimeout(() => {
+      autoSyncedSessions.current.add(sessionFilter);
+      autoSyncAttempts.current[sessionFilter] = attempts + 1;
+      syncMutation.mutate();
+    }, delay);
+
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    sessionFilter,
+    isSessionConnected,
+    chats.data?.items?.length,
+    chats.isLoading,
+    syncMutation.isPending,
+  ]);
+
+  // Reset sync attempts when session disconnects so a fresh QR connect can sync again.
+  useEffect(() => {
+    if (!isSessionConnected && sessionFilter) {
+      autoSyncedSessions.current.delete(sessionFilter);
+      delete autoSyncAttempts.current[sessionFilter];
+    }
+  }, [isSessionConnected, sessionFilter]);
 
   const sendMutation = useMutation({
     mutationFn: () => {
@@ -157,6 +323,9 @@ export default function ChatsPage() {
         >
           Sync chats
         </button>
+        {syncMutation.isPending ? (
+          <p className="text-sm text-blue-300">Pulling previous chats from phone…</p>
+        ) : null}
         {activeSession && !isSessionConnected ? (
           <p className="text-sm text-amber-400">
             Session is {activeSession.status}. Scan the QR on WhatsApp Sessions before syncing or sending.
@@ -191,14 +360,20 @@ export default function ChatsPage() {
                   selectedChatId === chat.id ? "bg-slate-800" : ""
                 }`}
               >
-                <p className="font-medium">{chat.name ?? chat.externalId}</p>
+                <p className="font-medium">{getChatHeading(chat)}</p>
                 <p className="text-xs text-slate-400">
-                  {chat.type} · {chat.unreadCount} unread · {formatDate(chat.lastMessageAt)}
+                  {getChatSubheading(chat)} · {chat.unreadCount} unread · {formatDate(chat.lastMessageAt)}
                 </p>
               </button>
               ))
             ) : (
-              <p className="px-4 py-6 text-sm text-slate-400">No chats match your search.</p>
+              <p className="px-4 py-6 text-sm text-slate-400">
+                {syncMutation.isPending
+                  ? "Loading previous chats from your phone…"
+                  : chatSearch.trim()
+                    ? "No chats match your search."
+                    : "No chats yet. Click Sync chats to pull conversations from your phone."}
+              </p>
             )}
           </div>
         </div>
@@ -207,8 +382,12 @@ export default function ChatsPage() {
           {selectedChat ? (
             <>
               <div className="border-b border-slate-800 px-4 py-3">
-                <p className="font-medium">{selectedChat.name ?? selectedChat.externalId}</p>
-                <p className="text-xs text-slate-400">{selectedChat.externalId}</p>
+                <p className="font-medium">{getChatHeading(selectedChat)}</p>
+                <p className="text-xs text-slate-400">
+                  {getChatPhone(selectedChat)
+                    ? `${getChatPhone(selectedChat)} · ${selectedChat.type}`
+                    : selectedChat.type}
+                </p>
                 <input
                   value={messageSearch}
                   onChange={(event) => setMessageSearch(event.target.value)}

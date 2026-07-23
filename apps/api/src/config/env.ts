@@ -3,10 +3,19 @@ import { dirname, resolve } from "path";
 import { fileURLToPath } from "url";
 import { z } from "zod";
 
+const apiEnvPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../.env");
+const rootEnvPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../../.env");
+
 config({
-  path: resolve(dirname(fileURLToPath(import.meta.url)), "../../.env"),
+  path: apiEnvPath,
   override: true,
 });
+
+// If apps/api/.env has an empty GEMINI_API_KEY=, fill from monorepo root .env.
+if (!process.env.GEMINI_API_KEY?.trim()) {
+  delete process.env.GEMINI_API_KEY;
+  config({ path: rootEnvPath });
+}
 
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),

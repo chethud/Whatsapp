@@ -6,9 +6,11 @@ import {
 } from "@whatsapp/shared";
 
 import { prisma } from "../../config/prisma.js";
+import { env } from "../../config/env.js";
 import { requireAuth, requirePermission } from "../../middleware/auth.js";
 import { validateBody } from "../../middleware/validate.js";
-import { generateChatCompletion } from "../../lib/ai/provider.js";
+import { generateRealEstateReply } from "../../lib/ai/reply-service.js";
+import { generateAllianceSquareFlowReply } from "../../lib/ai/conversation-flow.js";
 
 export const aiRouter = Router();
 
@@ -36,73 +38,56 @@ aiRouter.post("/knowledge-base", validateBody(createKnowledgeDocumentSchema), as
 
 aiRouter.post("/reply", validateBody(generateAiReplySchema), async (req, res, next) => {
   try {
-    const [conversation, docs, templates] = await Promise.all([
-      prisma.aiConversation.upsert({
-        where: {
-          sessionId_chatId: {
-            sessionId: req.body.sessionId,
-            chatId: req.body.chatId,
-          },
-        },
-        update: {},
-        create: {
-          sessionId: req.body.sessionId,
-          chatId: req.body.chatId,
-        },
-        include: { messages: { orderBy: { createdAt: "asc" }, take: 20 } },
-      }),
-      prisma.knowledgeDocument.findMany({ take: 5, orderBy: { updatedAt: "desc" } }),
-      prisma.promptTemplate.findMany({ take: 3, orderBy: { updatedAt: "desc" } }),
-    ]);
+    const settings = await prisma.appSetting.findFirst();
+    const provider = req.body.provider ?? settings?.defaultAiProvider ?? "GEMINI";
+    const geminiReady = Boolean(env.GEMINI_API_KEY?.trim());
+    // Default to scripted Alliance Square flow so Generate works without Gemini.
+    // Set body.useGemini=true to force the free-form Gemini reply path when a key exists.
+    const forceGemini = req.body.useGemini === true;
 
-    const knowledgeContext = docs.map((doc) => `${doc.title}: ${doc.content}`).join("\n\n");
-    const templateContext = templates.map((template) => `${template.name}: ${template.content}`).join("\n\n");
+    if (!forceGemini || !geminiReady) {
+      const flow = await generateAllianceSquareFlowReply({
+        sessionId: req.body.sessionId,
+        chatId: req.body.chatId,
+        userMessage: req.body.prompt,
+      });
 
-    const result = await generateChatCompletion({
-      provider: req.body.provider,
+      return res.json({
+        success: true,
+        data: {
+          conversationId: flow.conversationId,
+          reply: flow.replies?.join("\n\n") ?? flow.reply,
+          model: geminiReady ? "alliance-square-flow" : "alliance-square-flow (no GEMINI_API_KEY)",
+          stage: flow.stage,
+          suggestedProperties: flow.suggestedProperties,
+          geminiConfigured: geminiReady,
+        },
+      });
+    }
+
+    const result = await generateRealEstateReply({
+      sessionId: req.body.sessionId,
+      chatId: req.body.chatId,
+      userMessage: req.body.prompt,
+      provider,
       temperature: req.body.temperature,
       maxTokens: req.body.maxTokens,
-      messages: [
-        {
-          role: "system",
-          content:
-            `Use the business prompt templates and knowledge base to answer accurately.\n\nTemplates:\n${templateContext}\n\nKnowledge:\n${knowledgeContext}`,
-        },
-        ...conversation.messages.map((message) => ({
-          role: message.role as "system" | "user" | "assistant",
-          content: message.content,
-        })),
-        {
-          role: "user",
-          content: req.body.prompt,
-        },
-      ],
     });
 
-    await prisma.aiMessage.createMany({
-      data: [
-        {
-          conversationId: conversation.id,
-          role: "user",
-          content: req.body.prompt,
-        },
-        {
-          conversationId: conversation.id,
-          role: "assistant",
-          content: result.text,
-          model: result.model,
-          promptTokens: result.promptTokens,
-          completionTokens: result.completionTokens,
-        },
-      ],
-    });
+    if (!result) {
+      return res.status(409).json({
+        success: false,
+        error: "This conversation was escalated to a human agent.",
+      });
+    }
 
     res.json({
       success: true,
       data: {
-        conversationId: conversation.id,
-        reply: result.text,
+        conversationId: result.conversationId,
+        reply: result.reply,
         model: result.model,
+        geminiConfigured: geminiReady,
       },
     });
   } catch (error) {
